@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rpicam-vid:*)",
+      "Bash(libcamera-hello:*)"
+    ]
+  }
+}
