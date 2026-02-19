@@ -14,6 +14,7 @@ Usage standalone (for testing):
 
 import os
 import sys
+import threading
 import time
 
 import cv2
@@ -76,10 +77,37 @@ class SpeciesClassifier:
         if len(self.english_names) < 2:
             raise ValueError(f"Trenger minst 2 arter i {species_path}")
 
-        # Initialize BioCLIP classifier
+        # Initialize BioCLIP classifier (takes 1-2 min on Pi 5)
         print(f"  Laster BioCLIP-modell ({len(self.english_names)} arter)...", flush=True)
-        self.classifier = CustomLabelsClassifier(self.english_names)
+        self.classifier = self._load_with_progress(self.english_names)
         print(f"  BioCLIP klar!", flush=True)
+
+    def _load_with_progress(self, species_list):
+        """Load the classifier while showing elapsed time."""
+        result = [None]
+        error = [None]
+
+        def _load():
+            try:
+                result[0] = CustomLabelsClassifier(species_list)
+            except Exception as e:
+                error[0] = e
+
+        thread = threading.Thread(target=_load)
+        t0 = time.time()
+        thread.start()
+
+        while thread.is_alive():
+            elapsed = time.time() - t0
+            print(f"\r  Laster modell... {elapsed:.0f}s", end="", flush=True)
+            thread.join(timeout=5)
+
+        elapsed = time.time() - t0
+        print(f"\r  Modell lastet pa {elapsed:.0f}s     ", flush=True)
+
+        if error[0]:
+            raise error[0]
+        return result[0]
 
     def classify(self, crop_bgr):
         """Classify a bird crop image.

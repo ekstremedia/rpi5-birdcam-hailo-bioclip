@@ -202,10 +202,67 @@ a zero-shot vision-language model trained on 10M+ biological images (CVPR 2024 B
 - Overlay: "Fugler na:", species names in Norwegian
 - Console: All startup, arrival, departure messages in Norwegian
 
+### 2026-02-19 - Unicode Text on Video Overlay (æøå)
+
+OpenCV's `putText` only supports ASCII, which is why the overlay showed "Fugler na" and "besok" instead of "Fugler nå" and "besøk". Switched text rendering to **PIL/Pillow** with the DejaVu Sans Bold TrueType font, which has full Unicode support.
+
+- Rectangles are still drawn with OpenCV (fast)
+- All text is collected and rendered in a single PIL pass per frame
+- Font: `/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf` (already on Debian)
+- Three font sizes: labels (20px), HUD (22px), non-bird class names (14px)
+- Species names with special characters (Kjøttmeis, Blåmeis, Skjære) now render correctly
+
+### 2026-02-19 - Non-Blocking Species Classification
+
+Moved BioCLIP species classification from the main processing loop to a background thread. Previously, each classification (~4s on Pi 5 CPU) froze the video stream while running.
+
+**Before:** Bird arrives → stream freezes for 4s → species label appears
+**After:** Bird arrives → stream continues uninterrupted, label shows "Fugl 85%" → ~4s later label smoothly updates to "Kjottmeis 87%"
+
+#### How it works
+- On bird arrival, the visit is logged immediately with `species=None`
+- The crop is copied and submitted to a daemon thread for classification
+- The overlay shows "Fugl {confidence}" until classification completes
+- When the background thread finishes, it updates `species_labels` and the DB
+- Next frame automatically picks up the species name
+- A `threading.Lock` serializes BioCLIP calls (shared temp file + CPU-bound anyway)
+
+### 2026-02-19 - Web-Based Bird Crop Labeling UI
+
+Added a `/label` page to the web dashboard for manually labeling bird crop images from a browser (phone/laptop on the same network). This builds training data for improving species classification.
+
+#### What it does
+- Shows unlabeled crop images one at a time, large and centered
+- Displays BioCLIP's auto-suggestion with confidence (highlighted in the species grid)
+- 42 species buttons using Norwegian names in a responsive grid
+- "Hopp over" to skip bad/unclear crops, "Angre siste" to undo mistakes
+- Progress counter: "3 av 47 merket"
+- Keyboard shortcuts: 1-9 for species, S for skip, Z for undo
+- Auto-advances to next image after labeling
+
+#### DB changes
+- Added `user_species` and `labeled_at` columns to `visits` table (ALTER TABLE migration, backwards-compatible)
+- New methods: `get_unlabeled_visits`, `set_label`, `skip_visit`, `undo_label`, `get_label_stats`
+
+#### API endpoints
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/label` | GET | Labeling page |
+| `/api/label/queue` | GET | Next unlabeled crop |
+| `/api/label/species` | GET | Species list from `norwegian_species.txt` |
+| `/api/label/stats` | GET | Labeling progress (total, labeled, skipped, unlabeled) |
+| `/api/label/save` | POST | Save label `{visit_id, species}` |
+| `/api/label/skip` | POST | Skip image `{visit_id}` |
+| `/api/label/undo` | POST | Undo label `{visit_id}` |
+
+#### Usage
+Start `bird_monitor.py` as usual, then open `http://PI_IP:8888/label` in a browser.
+
 ## Next Steps
 - [ ] Point camera at bird feeder and test species identification with real birds
 - [x] Add species classification (Phase 2) — BioCLIP zero-shot
 - [x] Add retraining pipeline for learning new species (Phase 3)
 - [x] Norwegian translation of all user-facing text
+- [x] Web-based labeling UI at `/label` for building training data
 - [ ] Set up auto-start on boot (systemd service)
 - [ ] Add daily/weekly bird statistics to dashboard

@@ -24,6 +24,8 @@ from datetime import datetime, date
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
+from PIL import Image, ImageDraw, ImageFont
+
 from picamera2 import Picamera2
 from picamera2.devices import Hailo
 
@@ -51,6 +53,19 @@ CROP_SAVE_INTERVAL = 3.0  # seconds between crop saves for the same tracked bird
 # Species classifier (Phase 2 — BioCLIP zero-shot)
 SPECIES_LIST_PATH = "/home/pi/ai/models/norwegian_species.txt"
 SPECIES_RELOAD_INTERVAL = 60  # seconds between hot-reload checks
+
+# Fonts for PIL text rendering (supports æøå, unlike OpenCV putText)
+FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+FONT_LABEL = ImageFont.truetype(FONT_PATH, 20)    # bird labels on bboxes
+FONT_HUD = ImageFont.truetype(FONT_PATH, 22)      # status overlay (top-left)
+FONT_SMALL = ImageFont.truetype(FONT_PATH, 14)     # non-bird class names
+
+
+def pil_text_size(text, font):
+    """Get (width, height) of rendered text using PIL."""
+    bbox = font.getbbox(text)
+    return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
 
 # COCO class names (80 classes, index 14 = bird)
 COCO_CLASSES = [
@@ -114,6 +129,12 @@ class BirdDB:
             );
             CREATE INDEX IF NOT EXISTS idx_det_ts ON detections(timestamp);
         """)
+        # Migration: add labeling columns to visits table
+        for col, coltype in [("user_species", "TEXT"), ("labeled_at", "TEXT")]:
+            try:
+                conn.execute(f"ALTER TABLE visits ADD COLUMN {col} {coltype}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
         conn.commit()
         conn.close()
 
@@ -123,6 +144,15 @@ class BirdDB:
             "INSERT INTO visits (track_id, start_time, max_confidence, crop_path, species) "
             "VALUES (?, ?, ?, ?, ?)",
             (track_id, timestamp, confidence, crop_path, species),
+        )
+        conn.commit()
+
+    def update_visit_species(self, track_id, species):
+        """Update the auto-classified species for a visit (called from background thread)."""
+        conn = self._get_conn()
+        conn.execute(
+            "UPDATE visits SET species = ? WHERE track_id = ? AND end_time IS NULL",
+            (species, track_id),
         )
         conn.commit()
 
@@ -148,6 +178,59 @@ class BirdDB:
             "SELECT * FROM visits ORDER BY start_time DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_unlabeled_visits(self, limit=1):
+        """Get visits that have crop images but no user label yet."""
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT id, track_id, start_time, species, max_confidence, crop_path "
+            "FROM visits WHERE crop_path IS NOT NULL AND user_species IS NULL "
+            "ORDER BY start_time DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_label(self, visit_id, species):
+        """Set the human-assigned species label for a visit."""
+        conn = self._get_conn()
+        now = datetime.now().isoformat(timespec="seconds")
+        conn.execute(
+            "UPDATE visits SET user_species = ?, labeled_at = ? WHERE id = ?",
+            (species, now, visit_id),
+        )
+        conn.commit()
+
+    def skip_visit(self, visit_id):
+        """Mark a visit as skipped (not useful for training)."""
+        self.set_label(visit_id, "skip")
+
+    def undo_label(self, visit_id):
+        """Remove the label from a visit so it appears unlabeled again."""
+        conn = self._get_conn()
+        conn.execute(
+            "UPDATE visits SET user_species = NULL, labeled_at = NULL WHERE id = ?",
+            (visit_id,),
+        )
+        conn.commit()
+
+    def get_label_stats(self):
+        """Get labeling progress counts."""
+        conn = self._get_conn()
+        total = conn.execute(
+            "SELECT COUNT(*) FROM visits WHERE crop_path IS NOT NULL"
+        ).fetchone()[0]
+        labeled = conn.execute(
+            "SELECT COUNT(*) FROM visits WHERE crop_path IS NOT NULL "
+            "AND user_species IS NOT NULL AND user_species != 'skip'"
+        ).fetchone()[0]
+        skipped = conn.execute(
+            "SELECT COUNT(*) FROM visits WHERE user_species = 'skip'"
+        ).fetchone()[0]
+        return {
+            "total": total,
+            "labeled": labeled,
+            "skipped": skipped,
+            "unlabeled": total - labeled - skipped,
+        }
 
 
 # ============================================================
@@ -302,15 +385,12 @@ class BirdMonitor:
         # Crop save rate limiting
         self.last_crop_time = {}  # track_id -> timestamp
 
-        # Species classifier (loaded lazily — graceful degradation if missing)
+        # Species classifier (loaded in background — detection starts immediately)
         self.classifier = None
+        self.classifier_loading = False
         self.species_labels = {}  # track_id -> (species, confidence)
+        self.classify_lock = threading.Lock()  # serialize BioCLIP calls (shared temp file)
         self.last_reload_check = 0
-        try:
-            self.classifier = SpeciesClassifier(SPECIES_LIST_PATH)
-        except (FileNotFoundError, ImportError, ValueError) as e:
-            print(f"  Artsklassifisering ikke tilgjengelig: {e}", flush=True)
-            print("  Kjører uten artsklassifisering (fugler vises som 'Fugl')", flush=True)
 
         os.makedirs(CROP_DIR, exist_ok=True)
 
@@ -346,9 +426,25 @@ class BirdMonitor:
         print(f"  Kamera klart: {FRAME_WIDTH}x{FRAME_HEIGHT}", flush=True)
 
         # Start processing in background thread
+        # Start processing immediately (detection works without species classifier)
         self._thread = threading.Thread(target=self._process_loop, daemon=True)
         self._thread.start()
         print(f"Behandlingsløkke startet. Dashbord på http://0.0.0.0:{PORT}", flush=True)
+
+        # Load species classifier in background (takes 1-2 min)
+        self.classifier_loading = True
+        self._classifier_thread = threading.Thread(target=self._load_classifier, daemon=True)
+        self._classifier_thread.start()
+
+    def _load_classifier(self):
+        """Load species classifier in background thread."""
+        try:
+            self.classifier = SpeciesClassifier(SPECIES_LIST_PATH)
+            print("  Artsklassifisering aktivert!", flush=True)
+        except (FileNotFoundError, ImportError, ValueError) as e:
+            print(f"  Artsklassifisering ikke tilgjengelig: {e}", flush=True)
+        finally:
+            self.classifier_loading = False
 
     def stop(self):
         """Clean shutdown - waits for processing thread to finish first."""
@@ -410,22 +506,26 @@ class BirdMonitor:
                     bbox = self.tracker.bboxes.get(tid)
                     crop_path = self._save_crop(frame_rgb, bbox, tid)
 
-                    # Species classification on arrival
-                    species = None
-                    species_conf = 0.0
-                    if self.classifier and bbox:
-                        species, species_conf = self._classify_bird(frame_rgb, bbox)
-                        if species:
-                            self.species_labels[tid] = (species, species_conf)
-
-                    self.db.log_visit_start(tid, now_str, conf, crop_path, species=species)
+                    # Log visit immediately (species filled in later by background thread)
+                    self.db.log_visit_start(tid, now_str, conf, crop_path, species=None)
                     self.today_visits = self.db.get_today_count()
-
-                    species_str = f" art={species} ({species_conf:.0%})" if species else ""
                     print(
-                        f"  [{now_str}] Fugl ankommet! spor={tid} konf={conf:.2f}{species_str}",
+                        f"  [{now_str}] Fugl ankommet! spor={tid} konf={conf:.2f}",
                         flush=True,
                     )
+
+                    # Submit species classification to background thread (non-blocking)
+                    if self.classifier and bbox:
+                        crop_copy = frame_rgb[
+                            max(0, int(bbox[1])):min(frame_rgb.shape[0], int(bbox[3])),
+                            max(0, int(bbox[0])):min(frame_rgb.shape[1], int(bbox[2]))
+                        ].copy()
+                        if crop_copy.shape[0] >= 20 and crop_copy.shape[1] >= 20:
+                            threading.Thread(
+                                target=self._classify_bird_async,
+                                args=(tid, crop_copy),
+                                daemon=True,
+                            ).start()
 
                 for tid in self.tracker.departures:
                     self.db.log_visit_end(tid, now_str)
@@ -574,43 +674,60 @@ class BirdMonitor:
         return f"Fugl {det_conf:.0%}"
 
     def _draw_overlays(self, frame_bgr, bird_dets, all_dets):
-        """Draw bounding boxes and status overlay on the frame (BGR, in-place)."""
+        """Draw bounding boxes and status overlay on the frame (BGR, in-place).
+
+        Uses OpenCV for rectangles/lines (fast) and PIL for text (Unicode support).
+        """
+        # Collect text draws: (text, x, y, font, fill, bg)
+        text_draws = []
+
         # Bird detections: bright green, thick
         for d in bird_dets:
             x1, y1, x2, y2 = int(d["x_min"]), int(d["y_min"]), int(d["x_max"]), int(d["y_max"])
             conf = d["confidence"]
             cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 0), 3)
 
-            # Use species label if available for any tracked bird at this location
             label = self._get_species_label(x1, y1, x2, y2, conf)
+            tw, th = pil_text_size(label, FONT_LABEL)
+            cv2.rectangle(frame_bgr, (x1, y1 - th - 10), (x1 + tw + 8, y1), (0, 255, 0), -1)
+            text_draws.append((label, x1 + 4, y1 - th - 7, FONT_LABEL, (0, 0, 0)))
 
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
-            cv2.rectangle(frame_bgr, (x1, y1 - th - 10), (x1 + tw + 6, y1), (0, 255, 0), -1)
-            cv2.putText(frame_bgr, label, (x1 + 3, y1 - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
-
-        # Other detections: dim gray, thin (for debug context)
+        # Other detections: dim gray, thin
         for d in all_dets:
             if d["class_id"] == BIRD_CLASS_ID:
                 continue
             x1, y1, x2, y2 = int(d["x_min"]), int(d["y_min"]), int(d["x_max"]), int(d["y_max"])
             cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (100, 100, 100), 1)
-            cv2.putText(frame_bgr, d["class_name"], (x1, y1 - 4),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
+            text_draws.append((d["class_name"], x1, y1 - 4, FONT_SMALL, (100, 100, 100)))
 
         # Status overlay (top-left)
+        if self.classifier_loading:
+            species_status = "Artsmodell laster..."
+        elif self.classifier:
+            species_status = "Artsgjenkjenning aktiv"
+        else:
+            species_status = ""
+
         lines = [
-            f"Fugler na: {self.current_bird_count}",
-            f"I dag: {self.today_visits} besok",
+            f"Fugler nå: {self.current_bird_count}",
+            f"I dag: {self.today_visits} besøk",
             f"FPS: {self.fps:.1f}",
         ]
-        y = 30
+        if species_status:
+            lines.append(species_status)
+        y = 10
         for line in lines:
-            (tw, th), _ = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)
-            cv2.rectangle(frame_bgr, (8, y - th - 4), (8 + tw + 10, y + 6), (0, 0, 0), -1)
-            cv2.putText(frame_bgr, line, (13, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2)
-            y += th + 18
+            tw, th = pil_text_size(line, FONT_HUD)
+            cv2.rectangle(frame_bgr, (8, y), (8 + tw + 12, y + th + 8), (0, 0, 0), -1)
+            text_draws.append((line, 14, y + 2, FONT_HUD, (78, 204, 163)))
+            y += th + 14
+
+        # Render all text in one PIL pass
+        img_pil = Image.fromarray(frame_bgr)
+        draw = ImageDraw.Draw(img_pil)
+        for text, tx, ty, font, fill in text_draws:
+            draw.text((tx, ty), text, font=font, fill=fill)
+        frame_bgr[:] = np.array(img_pil)
 
     # ---- Crop saving ----
 
@@ -645,30 +762,24 @@ class BirdMonitor:
 
     # ---- Species classification ----
 
-    def _classify_bird(self, frame_rgb, bbox):
-        """Classify a bird's species from its bounding box region.
+    def _classify_bird_async(self, track_id, crop):
+        """Classify a bird in a background thread and update labels when done.
 
-        Returns (species_name, confidence) or (None, 0.0) on failure.
+        Called from a daemon thread so the video loop never blocks (~4s on Pi 5).
+        Uses a lock to serialize access (BioCLIP uses a shared temp file).
         """
         try:
-            x1, y1, x2, y2 = (int(v) for v in bbox)
-            h, w = frame_rgb.shape[:2]
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(w, x2), min(h, y2)
-            if x2 - x1 < 20 or y2 - y1 < 20:
-                return None, 0.0
-
-            crop = frame_rgb[y1:y2, x1:x2]
-            species, confidence = self.classifier.classify(crop)
-
-            # Filter out "not_a_bird" predictions
-            if species.lower() == "not_a_bird":
-                return None, 0.0
-
-            return species, confidence
+            with self.classify_lock:
+                species, confidence = self.classifier.classify(crop)
+            if species and species.lower() != "not_a_bird":
+                self.species_labels[track_id] = (species, confidence)
+                self.db.update_visit_species(track_id, species)
+                print(
+                    f"  [art] spor={track_id} \u2192 {species} ({confidence:.0%})",
+                    flush=True,
+                )
         except Exception as e:
             print(f"  Feil ved artsklassifisering: {e}", flush=True)
-            return None, 0.0
 
     # ---- Public API for HTTP server ----
 
@@ -785,20 +896,275 @@ poll(); birds();
 </html>"""
 
 
+LABEL_HTML = """<!DOCTYPE html>
+<html lang="no">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Merking av fuglebilder</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#1a1a2e; color:#e0e0e0; font-family:-apple-system,BlinkMacSystemFont,sans-serif; }
+  .header { background:#16213e; padding:12px 20px; display:flex; align-items:center; gap:12px;
+             border-bottom:2px solid #4ecca3; flex-wrap:wrap; }
+  .header h1 { font-size:1.2em; color:#4ecca3; font-weight:600; }
+  .header .progress { color:#888; font-size:0.9em; margin-left:auto; }
+  .header a { color:#4ecca3; text-decoration:none; font-size:0.85em; }
+  .container { max-width:700px; margin:0 auto; padding:16px; }
+  .crop-box { background:#000; border-radius:8px; overflow:hidden; text-align:center;
+              margin-bottom:12px; min-height:200px; display:flex; align-items:center;
+              justify-content:center; }
+  .crop-box img { max-width:100%; max-height:50vh; object-fit:contain; display:block; margin:auto; }
+  .crop-box .empty { color:#555; font-style:italic; padding:40px; }
+  .suggestion { background:#16213e; border-radius:8px; padding:12px 16px; margin-bottom:12px;
+                font-size:1em; text-align:center; }
+  .suggestion .species { color:#4ecca3; font-weight:600; }
+  .suggestion .conf { color:#888; }
+  .species-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(130px, 1fr));
+                  gap:8px; margin-bottom:12px; }
+  .species-btn { background:#16213e; border:2px solid #2a2a4a; border-radius:8px; padding:10px 6px;
+                 color:#e0e0e0; font-size:0.9em; cursor:pointer; text-align:center;
+                 transition:all 0.15s; }
+  .species-btn:hover { background:#1f2b47; border-color:#4ecca3; }
+  .species-btn:active { transform:scale(0.96); }
+  .species-btn.suggested { border-color:#4ecca3; background:#1a3a2e; }
+  .species-btn .key { display:inline-block; background:#2a2a4a; color:#888; border-radius:3px;
+                      font-size:0.7em; padding:1px 5px; margin-right:4px; vertical-align:middle; }
+  .actions { display:flex; gap:10px; margin-bottom:16px; }
+  .actions button { flex:1; padding:12px; border:2px solid #2a2a4a; border-radius:8px;
+                    font-size:0.95em; cursor:pointer; transition:all 0.15s; }
+  .skip-btn { background:#2a1a1a; color:#e07070; border-color:#5a2a2a !important; }
+  .skip-btn:hover { background:#3a2020; border-color:#e07070 !important; }
+  .undo-btn { background:#1a1a2e; color:#aaa; }
+  .undo-btn:hover { background:#252540; border-color:#888 !important; }
+  .undo-btn:disabled { opacity:0.3; cursor:not-allowed; }
+  .done { text-align:center; padding:60px 20px; }
+  .done h2 { color:#4ecca3; margin-bottom:10px; }
+  .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#4ecca3;
+           color:#1a1a2e; padding:10px 24px; border-radius:20px; font-weight:600; opacity:0;
+           transition:opacity 0.3s; pointer-events:none; z-index:100; }
+  .toast.show { opacity:1; }
+  .shortcuts { color:#555; font-size:0.75em; text-align:center; margin-top:8px; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>Merking av fuglebilder</h1>
+    <span class="progress" id="progress"></span>
+    <a href="/">&larr; Dashbord</a>
+  </div>
+  <div class="container">
+    <div class="crop-box" id="cropBox">
+      <div class="empty">Laster...</div>
+    </div>
+    <div class="suggestion" id="suggestion" style="display:none"></div>
+    <div class="species-grid" id="speciesGrid"></div>
+    <div class="actions" id="actions" style="display:none">
+      <button class="skip-btn" onclick="skipImage()">Hopp over (S)</button>
+      <button class="undo-btn" id="undoBtn" onclick="undoLast()" disabled>Angre siste (Z)</button>
+    </div>
+    <div class="shortcuts">Tastatursnarveier: 1-9 = velg art, S = hopp over, Z = angre</div>
+  </div>
+  <div class="toast" id="toast"></div>
+
+<script>
+let currentVisit = null;
+let speciesList = [];
+let lastLabeledId = null;
+let suggestedSpecies = '';
+
+async function loadSpecies() {
+  try {
+    const r = await fetch('/api/label/species');
+    speciesList = await r.json();
+    renderSpeciesButtons();
+  } catch(e) { console.error('Feil ved lasting av artsliste:', e); }
+}
+
+function renderSpeciesButtons() {
+  const grid = document.getElementById('speciesGrid');
+  grid.innerHTML = speciesList.map((sp, i) => {
+    const isSuggested = suggestedSpecies && sp.norwegian === suggestedSpecies;
+    const keyLabel = i < 9 ? '<span class="key">' + (i+1) + '</span>' : '';
+    return '<button class="species-btn' + (isSuggested ? ' suggested' : '') +
+           '" onclick="labelImage(\'' + sp.norwegian.replace(/'/g, "\\\\'") + '\')">' +
+           keyLabel + sp.norwegian + '</button>';
+  }).join('');
+}
+
+async function loadNext() {
+  try {
+    const r = await fetch('/api/label/queue');
+    const data = await r.json();
+    if (!data || !data.id) {
+      showDone();
+      return;
+    }
+    currentVisit = data;
+    const cropBox = document.getElementById('cropBox');
+    const cropUrl = data.crop_path.replace('/home/pi/ai/bird_crops/', '/crops/');
+    cropBox.innerHTML = '<img src="' + cropUrl + '" alt="Fugl">';
+
+    const suggestion = document.getElementById('suggestion');
+    if (data.species) {
+      suggestedSpecies = data.species;
+      const confPct = data.max_confidence ? (data.max_confidence * 100).toFixed(0) + '%' : '';
+      suggestion.innerHTML = 'BioCLIP: <span class="species">' + data.species +
+                             '</span> <span class="conf">(' + confPct + ')</span>';
+      suggestion.style.display = '';
+    } else {
+      suggestedSpecies = '';
+      suggestion.style.display = 'none';
+    }
+    renderSpeciesButtons();
+    document.getElementById('actions').style.display = '';
+    updateProgress();
+  } catch(e) { console.error('Feil ved lasting av bilde:', e); }
+}
+
+async function labelImage(species) {
+  if (!currentVisit) return;
+  const visitId = currentVisit.id;
+  try {
+    await fetch('/api/label/save', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({visit_id: visitId, species: species})
+    });
+    lastLabeledId = visitId;
+    document.getElementById('undoBtn').disabled = false;
+    showToast('Merket: ' + species);
+    loadNext();
+  } catch(e) { console.error('Feil ved lagring:', e); }
+}
+
+async function skipImage() {
+  if (!currentVisit) return;
+  const visitId = currentVisit.id;
+  try {
+    await fetch('/api/label/skip', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({visit_id: visitId})
+    });
+    lastLabeledId = visitId;
+    document.getElementById('undoBtn').disabled = false;
+    showToast('Hoppet over');
+    loadNext();
+  } catch(e) { console.error('Feil ved hopping:', e); }
+}
+
+async function undoLast() {
+  if (!lastLabeledId) return;
+  try {
+    await fetch('/api/label/undo', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({visit_id: lastLabeledId})
+    });
+    showToast('Angret');
+    lastLabeledId = null;
+    document.getElementById('undoBtn').disabled = true;
+    loadNext();
+  } catch(e) { console.error('Feil ved angring:', e); }
+}
+
+async function updateProgress() {
+  try {
+    const r = await fetch('/api/label/stats');
+    const s = await r.json();
+    document.getElementById('progress').textContent =
+      s.labeled + ' av ' + s.total + ' merket' + (s.skipped ? ' (' + s.skipped + ' hoppet over)' : '');
+  } catch(e) {}
+}
+
+function showDone() {
+  document.querySelector('.container').innerHTML =
+    '<div class="done"><h2>Ferdig!</h2><p>Alle bilder er merket.</p>' +
+    '<p style="margin-top:16px"><a href="/" style="color:#4ecca3">Tilbake til dashbord</a></p></div>';
+  updateProgress();
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 1200);
+}
+
+document.addEventListener('keydown', function(e) {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.key === 's' || e.key === 'S') { skipImage(); return; }
+  if (e.key === 'z' || e.key === 'Z') { undoLast(); return; }
+  const num = parseInt(e.key);
+  if (num >= 1 && num <= 9 && num <= speciesList.length) {
+    labelImage(speciesList[num - 1].norwegian);
+  }
+});
+
+loadSpecies();
+loadNext();
+</script>
+</body>
+</html>"""
+
+
 class BirdHandler(BaseHTTPRequestHandler):
     """HTTP request handler for the bird monitor web interface."""
 
     def do_GET(self):
         if self.path == "/":
             self._serve_dashboard()
+        elif self.path == "/label":
+            self._serve_label_page()
         elif self.path == "/stream":
             self._serve_mjpeg()
         elif self.path == "/api/stats":
             self._serve_json(monitor.get_stats())
         elif self.path == "/api/birds":
             self._serve_json(monitor.get_recent_birds())
+        elif self.path == "/api/label/queue":
+            self._serve_label_queue()
+        elif self.path == "/api/label/species":
+            self._serve_label_species()
+        elif self.path == "/api/label/stats":
+            self._serve_json(monitor.db.get_label_stats())
         elif self.path.startswith("/crops/"):
             self._serve_crop()
+        else:
+            self.send_error(404)
+
+    def do_POST(self):
+        content_len = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_len) if content_len else b""
+        try:
+            data = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            self.send_error(400, "Ugyldig JSON")
+            return
+
+        if self.path == "/api/label/save":
+            visit_id = data.get("visit_id")
+            species = data.get("species")
+            if not visit_id or not species:
+                self.send_error(400, "Mangler visit_id eller species")
+                return
+            monitor.db.set_label(visit_id, species)
+            self._serve_json({"ok": True})
+        elif self.path == "/api/label/skip":
+            visit_id = data.get("visit_id")
+            if not visit_id:
+                self.send_error(400, "Mangler visit_id")
+                return
+            monitor.db.skip_visit(visit_id)
+            self._serve_json({"ok": True})
+        elif self.path == "/api/label/undo":
+            visit_id = data.get("visit_id")
+            if not visit_id:
+                self.send_error(400, "Mangler visit_id")
+                return
+            monitor.db.undo_label(visit_id)
+            self._serve_json({"ok": True})
         else:
             self.send_error(404)
 
@@ -856,6 +1222,42 @@ class BirdHandler(BaseHTTPRequestHandler):
         self.end_headers()
         with open(full_path, "rb") as f:
             self.wfile.write(f.read())
+
+    def _serve_label_page(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(LABEL_HTML.encode())
+
+    def _serve_label_queue(self):
+        visits = monitor.db.get_unlabeled_visits(limit=1)
+        if not visits:
+            self._serve_json({})
+            return
+        v = visits[0]
+        self._serve_json({
+            "id": v["id"],
+            "crop_path": v["crop_path"],
+            "species": v.get("species"),  # BioCLIP auto-species (Norwegian name)
+            "max_confidence": v["max_confidence"],
+            "start_time": v["start_time"],
+        })
+
+    def _serve_label_species(self):
+        """Return the species list with Norwegian names for the labeling UI."""
+        species = []
+        try:
+            with open(SPECIES_LIST_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "|" in line:
+                        en, no = line.split("|", 1)
+                        species.append({"english": en.strip(), "norwegian": no.strip()})
+        except FileNotFoundError:
+            pass
+        self._serve_json(species)
 
     def log_message(self, format, *args):
         pass  # suppress request logs
