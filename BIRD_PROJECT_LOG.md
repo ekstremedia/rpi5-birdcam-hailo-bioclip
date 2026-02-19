@@ -45,7 +45,7 @@ Use Raspberry Pi 5 + AI HAT+ to recognize and count birds at a bird feeder.
 
 ### 2026-02-18 - Live AI Stream Working!
 - Got live MJPEG stream with Hailo YOLOv8 AI detection working over HTTP
-- Model: YOLOv8m on Hailo-8 (COCO 80 classes, includes "bird")
+- Model: YOLOv8s on Hailo-8 (COCO 80 classes, includes "bird")
 - Stream runs at 1280x960 @ 30fps with AI bounding box overlay
 - Viewable in any browser on the local network
 
@@ -94,7 +94,118 @@ rpicam-hello --list-cameras
 
 Configs are in `/usr/share/rpi-camera-assets/`. Swap via `--post-process-file` flag.
 
+### 2026-02-19 - Bird Monitor Application Built!
+
+Built `bird_monitor.py` — a complete bird detection, tracking, and monitoring system.
+
+#### Architecture
+Two-stage pipeline (Stage 1 complete, Stage 2 planned):
+```
+Camera (picamera2, 1280x960 RGB)
+  → Resize to 640x640
+  → YOLOv8s on Hailo-8 (Stage 1: Detection)
+  → Filter COCO class 14 ("bird")
+  → Centroid tracker (arrival/departure counting)
+  → SQLite logging + crop saving
+  → Web dashboard with MJPEG stream
+```
+
+#### Key discoveries during implementation
+
+**Hailo output format**: The `picamera2.devices.Hailo` wrapper returns a **list of 80 numpy arrays** (one per COCO class), NOT a single (80, 5, 100) tensor as the model shape suggests. Each array has shape `(N, 5)` where N = number of detections for that class. The 5 values are `[y_min, x_min, y_max, x_max, confidence]`, all normalized [0, 1].
+
+**Performance**: Running at **30 FPS** with full YOLOv8s inference on Hailo-8. The pipeline is not CPU-bound — Hailo handles inference, OpenCV handles drawing/encoding.
+
+**Camera resource management**: The Hailo device and camera can only be used by one process at a time. Must stop `stream.py` before running `bird_monitor.py` (and vice versa). The `picamera2` library needs a clean shutdown or the camera stays locked.
+
+#### What bird_monitor.py includes
+1. **Camera capture** via `picamera2` (1280x960 @ 30fps)
+2. **Hailo inference** via `picamera2.devices.Hailo` class
+3. **Detection parsing** for all 80 COCO classes, filtering for birds (class 14)
+4. **Centroid-based tracker** — tracks birds across frames, counts arrivals/departures
+5. **SQLite database** (`birds.db`) — logs each bird visit with timestamps, confidence, crop path
+6. **Auto crop saving** — saves bird images to `bird_crops/YYYY-MM-DD/` with rate limiting
+7. **Web dashboard** at port 8888:
+   - `/` — Live dashboard with bird count, visit counter, recent visitors
+   - `/stream` — Raw MJPEG stream with bounding box overlays
+   - `/api/stats` — JSON stats (current birds, today visits, FPS)
+   - `/api/birds` — JSON list of recent bird visits
+   - `/crops/<path>` — Serves saved crop images
+8. **Overlay drawing** — Green boxes for birds, gray for other objects, status HUD
+
+#### Quick reference
+
+**Start the bird monitor:**
+```bash
+python3 /home/pi/ai/bird_monitor.py
+```
+Then open `http://192.168.1.176:8888` in a browser.
+
+**Run in background:**
+```bash
+nohup python3 /home/pi/ai/bird_monitor.py > /tmp/bird-monitor.log 2>&1 &
+```
+
+**Stop:**
+```bash
+pkill -f bird_monitor.py
+```
+
+**Important:** Only one of `stream.py` or `bird_monitor.py` can run at a time (they share the camera and Hailo device).
+
+#### Files
+| File | Purpose |
+|---|---|
+| `bird_monitor.py` | Main application (~500 lines) |
+| `birds.db` | SQLite database (auto-created) |
+| `bird_crops/` | Saved bird crop images (auto-created) |
+| `stream.py` | Original simple stream (kept as fallback) |
+
+### 2026-02-19 - Phase 2: Species Classification Added!
+
+Initially tried EfficientNet-B7 from HuggingFace (n2b8/backyard-birds), but it was trained
+on North American species only — completely wrong for Norwegian birds.
+
+**Switched to BioCLIP** ([imageomics/bioclip](https://huggingface.co/imageomics/bioclip)) —
+a zero-shot vision-language model trained on 10M+ biological images (CVPR 2024 Best Student Paper).
+
+#### How it works
+- On bird arrival, the detection crop is classified by BioCLIP zero-shot
+- Species list is loaded from `models/norwegian_species.txt` (42 common Norwegian birds)
+- Model matches the image against all species names — no retraining needed
+- Norwegian names shown on bounding boxes ("Kjottmeis 87%" instead of "Fugl 92%")
+- Species logged to `birds.db` and shown on dashboard
+- ~4s per classification on Pi 5 CPU (only on arrival, not every frame)
+- To add new species: just edit `models/norwegian_species.txt` (hot-reloads every 60s)
+
+#### Why BioCLIP over traditional classifiers
+- **Zero-shot**: works with ANY species — just add the name to the text file
+- **Global coverage**: trained on 450K+ taxa from iNaturalist, not just North American birds
+- **No retraining needed**: adding a new species = adding a line to a text file
+- **Tested on crops**: Pilfink 99-100%, Graspurv 76%, Ravn 58%
+
+#### Model details
+- **Model**: BioCLIP 2 (ViT-B/16), ~600MB cached from HuggingFace
+- **Startup**: ~15 min first run (downloads model), ~2 min from cache
+- **Inference**: ~4s per classification on Pi 5 ARM64 CPU
+- **RAM**: ~2.6GB when loaded (Pi 5 has 8GB, plenty of room)
+
+#### Files
+| File | Purpose |
+|---|---|
+| `species_classifier.py` | BioCLIP species classifier module |
+| `train_species.py` | Retraining script for desktop/GPU (kept for future use) |
+| `models/norwegian_species.txt` | 42 Norwegian bird species (English + Norwegian names) |
+
+#### All user-facing text in Norwegian
+- Dashboard: "Fuglematerstasjon", "Fugler akkurat na", "Besok i dag", etc.
+- Overlay: "Fugler na:", species names in Norwegian
+- Console: All startup, arrival, departure messages in Norwegian
+
 ## Next Steps
-- [ ] Point camera at bird feeder
-- [ ] Adapt/build bird-specific detection + counting pipeline
-- [ ] Set up auto-start on boot
+- [ ] Point camera at bird feeder and test species identification with real birds
+- [x] Add species classification (Phase 2) — BioCLIP zero-shot
+- [x] Add retraining pipeline for learning new species (Phase 3)
+- [x] Norwegian translation of all user-facing text
+- [ ] Set up auto-start on boot (systemd service)
+- [ ] Add daily/weekly bird statistics to dashboard

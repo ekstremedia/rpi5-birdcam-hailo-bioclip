@@ -1,0 +1,18 @@
+# Models (too large for git)
+models/*.onnx
+
+# Database
+*.db
+
+# Bird crop images
+bird_crops/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Hailo runtime logs
+hailort*.log
+
+# Temp files
+/tmp/

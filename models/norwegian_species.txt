@@ -1,0 +1,60 @@
+# Vanlige norske fugler ved foringsplassen
+# Format: English Name | Norsk navn
+# Engelske navn brukes av modellen, norske vises i dashbordet.
+# Legg til flere arter etter behov.
+
+# Meiser
+Great Tit | Kjottmeis
+Blue Tit | Blameis
+Coal Tit | Svartmeis
+Crested Tit | Toppmeis
+Long-tailed Tit | Stjertmeis
+Willow Tit | Granmeis
+
+# Spurver og finker
+House Sparrow | Graspurv
+Eurasian Tree Sparrow | Pilfink
+Common Chaffinch | Bokfink
+Eurasian Bullfinch | Dompap
+European Greenfinch | Gronnfink
+European Goldfinch | Stillits
+Eurasian Siskin | Gronnsisik
+Common Redpoll | Grannsisik
+Pine Grosbeak | Konglebit
+Common Crossbill | Grankorsnebb
+
+# Troster
+Common Blackbird | Svarttrost
+Fieldfare | Gratrost
+Redwing | Rodvingetrost
+Song Thrush | Maltrost
+Mistle Thrush | Dubletrost
+
+# Spetter
+Great Spotted Woodpecker | Flaggspett
+Lesser Spotted Woodpecker | Dvergspett
+European Green Woodpecker | Gronnspett
+Black Woodpecker | Svartspett
+
+# Kraakefugler
+Eurasian Magpie | Skjaere
+Hooded Crow | Kraake
+Eurasian Jay | Notteskrike
+Eurasian Jackdaw | Kaie
+Common Raven | Ravn
+
+# Andre vanlige arter
+European Robin | Rodstrupe
+Eurasian Nuthatch | Spettmeis
+Eurasian Treecreeper | Trekryper
+Eurasian Wren | Gjerdesmett
+Dunnock | Jernspurv
+Common Starling | Staer
+Common Wood Pigeon | Ringdue
+Eurasian Collared Dove | Tyrkerdue
+Yellowhammer | Gulspurv
+White Wagtail | Linerle
+Bohemian Waxwing | Sidensvans
+
+# Rovfugler (sjeldnere ved for, men mulig)
+Eurasian Sparrowhawk | Spurvehauk

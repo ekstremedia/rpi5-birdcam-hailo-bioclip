@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(rpicam-vid:*)",
-      "Bash(libcamera-hello:*)"
+      "Bash(libcamera-hello:*)",
+      "Bash(python3:*)"
     ]
   }
 }
