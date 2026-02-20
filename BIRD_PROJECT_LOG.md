@@ -349,6 +349,75 @@ Also:
 - Removed accidental gstshark trace directory, added to `.gitignore`
 - Wrote project README with architecture diagram and setup instructions
 
+### 2026-02-20 - Live Stream Relay + Public Web Page Setup
+
+Built the infrastructure to stream the bird feeder live to ekstremedia.no with real-time stats.
+
+#### Architecture
+```
+Pi 5 (LAN)                    NUC (LAN)                    VPS (ekstremedia.no)
+─────────                     ─────────                    ────────────────────
+MJPEG stream ──────────────→  ffmpeg                       mediamtx
+http://pi:8888/stream         MJPEG → H.264 ──RTMP──────→  receives RTMP
+                              (1.5 Mbps)                   serves WebRTC/HLS
+                                                                │
+JSON stats  ───────────────→  stats_pusher.py                   ▼
+http://pi:8888/api/stats      polls Pi every 5s            Laravel
+http://pi:8888/api/birds      POSTs to Laravel ──────────→  /api/birdcam/stats
+                                                            → broadcasts via Reverb
+                                                            → public page /fuglekamera
+```
+
+#### NUC files created (`/home/terje/birdcam/`)
+
+| File | Purpose |
+|------|---------|
+| `stream_relay.sh` | ffmpeg: reads Pi MJPEG → encodes H.264 (ultrafast/zerolatency) → pushes RTMP to VPS |
+| `stats_pusher.py` | Polls Pi `/api/stats` + `/api/birds` every 5s, POSTs to Laravel endpoint |
+| `docker-compose.yml` | Added `stream-relay` and `stats-pusher` services alongside `species-api` |
+| `.env` | Added PI_STREAM, VPS_RTMP, LARAVEL_URL, LARAVEL_TOKEN, POLL_INTERVAL |
+
+#### stream_relay.sh details
+- Uses `linuxserver/ffmpeg` Docker image
+- libx264 ultrafast preset, zerolatency tune, 1.5 Mbps bitrate
+- Auto-reconnects to Pi stream, auto-restarts on ffmpeg crash
+- GOP size 50, keyint 25 (for HLS segment alignment)
+
+#### stats_pusher.py details
+- Exponential backoff on errors (max 60s delay)
+- Bearer token auth for Laravel endpoint
+- Logs push results: bird count, visits, FPS
+
+#### Laravel code prepared (`/home/terje/birdcam/laravel/`)
+
+| File | Purpose |
+|------|---------|
+| `BirdcamController.php` | `receiveStats` (POST), `status` (GET), `show` (blade view) |
+| `BirdcamStatsUpdated.php` | Reverb broadcast event on public `birdcam` channel |
+| `birdcam_routes.php` | Route definitions for api.php, web.php, channels.php |
+| `fuglekamera.blade.php` | Public page with WebRTC player (WHEP), HLS fallback, live stats via Reverb |
+
+#### Blade view features
+- WebRTC video via WHEP protocol (lowest latency), auto-fallback to HLS via hls.js
+- LIVE/OFFLINE badge based on stream connectivity
+- Real-time stats sidebar: current birds, today visits, species list with confidence
+- Reverb websocket updates — stats refresh instantly without polling
+- Dark theme, responsive layout, all text in Norwegian
+
+#### VPS setup documented (`VPS_SETUP.md`)
+- mediamtx: receives RTMP on :1935, serves WebRTC on :8889, HLS on :8888
+- nginx reverse proxy: `birdcam.ekstremedia.no` with SSL
+- systemd service for mediamtx
+- DNS: A record for birdcam.ekstremedia.no
+
+#### Deployment steps remaining
+1. Set up mediamtx on VPS (see VPS_SETUP.md)
+2. Deploy Laravel code to ekstremedia.no
+3. Create Sanctum token for NUC
+4. Set LARAVEL_TOKEN in NUC .env
+5. `docker compose up -d` on NUC
+6. Test at https://ekstremedia.no/fuglekamera
+
 ## Next Steps
 - [ ] Point camera at bird feeder and test species identification with real birds
 - [ ] Disable Canon G25 OSD overlays (FUNC → MENU → Display Setup → Output Onscreen Displays → Off)
@@ -361,5 +430,8 @@ Also:
 - [x] Config via `.env` file
 - [x] Switch to Canon LEGRIA via Elgato Cam Link
 - [ ] Set up auto-start on boot (systemd service)
-- [ ] Stream relay to VPS (Phase 3 of PLAN.md)
-- [ ] Public web page with WebRTC (Phase 5 of PLAN.md)
+- [x] Stream relay to VPS — ffmpeg + stats_pusher on NUC
+- [x] Public web page — fuglekamera.blade.php with WebRTC/HLS + Reverb stats
+- [ ] Deploy mediamtx on VPS
+- [ ] Deploy Laravel birdcam code to ekstremedia.no
+- [ ] Start NUC relay services and test end-to-end
