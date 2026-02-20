@@ -1,10 +1,12 @@
 # Bird Feeder Camera
 
-AI-powered bird feeder monitor that detects, tracks, and identifies bird species in real time — then streams it live to the web.
+An AI-powered bird feeder monitor that detects, tracks, and identifies bird species in real time — then streams it live to the web. This is a hobby/learning project built with a mix of off-the-shelf hardware and open-source AI models. If you're curious about building something similar, hopefully this gives you a good starting point.
 
-Three machines work together: a **Raspberry Pi 5** runs real-time detection at the feeder, an **Intel NUC** handles species classification and stream relay, and a **VPS** serves the live stream to the public.
+Three machines work together: a **Raspberry Pi 5** (a small, affordable single-board computer) runs real-time detection at the feeder, an **Intel NUC** (a small, quiet desktop PC) handles species classification, and a **VPS** (a rented cloud server) serves the live stream to the public.
 
 ## Architecture
+
+Here's how the three machines talk to each other. The Pi captures video and detects birds, sends crops to the NUC for species identification, and streams everything to the VPS so anyone can watch online:
 
 ```text
 Pi 5 (192.168.1.176)          NUC (192.168.1.64)           VPS (ekstremedia.no)
@@ -22,6 +24,10 @@ Canon G25 → Elgato            species-api :5555
 
 **Live at**: [ekstremedia.no/fuglekamera](https://ekstremedia.no/fuglekamera)
 
+### Why three machines?
+
+The **Pi** sits at the bird feeder doing real-time detection — it needs to be small, quiet, and close to the camera. Species classification (figuring out *which* bird it is) is much more demanding, taking ~4 seconds on the Pi but only ~0.2 seconds on the **NUC**, which has a proper Intel i7 processor. The **VPS** handles the public-facing stream because a home internet connection can't serve video to more than a handful of viewers at once.
+
 ---
 
 ## Raspberry Pi 5
@@ -31,25 +37,25 @@ The Pi runs `bird_monitor.py` — the main application that captures video, dete
 ### Hardware
 
 - Raspberry Pi 5 (8GB)
-- [Hailo-8 AI HAT+](https://www.raspberrypi.com/products/ai-hat-plus/) (26 TOPS neural accelerator)
-- Camera: Canon LEGRIA HF G25 via [Elgato Cam Link 4K](https://www.elgato.com/cam-link-4k) (HDMI capture)
+- [Hailo-8 AI HAT+](https://www.raspberrypi.com/products/ai-hat-plus/) — a plug-in accelerator board for running AI models, rated at 26 TOPS (tera operations per second — a measure of AI processing speed)
+- Camera: Canon LEGRIA HF G25 via [Elgato Cam Link 4K](https://www.elgato.com/cam-link-4k) (captures the camera's HDMI output as a USB webcam)
 - Backup camera: Raspberry Pi HQ Camera (IMX477, CSI)
 - OS: Debian 13 (trixie)
 
 ### Detection pipeline
 
 1. Camera captures 1920x1080 @ 25fps via Elgato Cam Link
-2. Each frame is resized to 640x640 and fed to **YOLOv8s** running on the Hailo-8
-3. Detections are filtered for COCO class 14 (bird), confidence > 0.4
-4. A centroid-based tracker assigns IDs, counts arrivals and departures
+2. Each frame is resized to 640x640 and fed to **YOLOv8s** (a fast object detection model — "You Only Look Once") running on the Hailo-8
+3. Detections are filtered for COCO class 14 (bird) — COCO is a standard dataset of everyday objects used to train detection models, and "bird" happens to be class number 14 — with a confidence threshold above 0.4
+4. A centroid-based tracker (an algorithm that follows objects between frames by their center point) assigns IDs, counts arrivals and departures
 5. On bird arrival, the crop is sent to the NUC for species classification
-6. Results are logged to SQLite, crops saved to disk
+6. Results are logged to SQLite (a simple file-based database), crops saved to disk
 
 ### Setup
 
 ```bash
-git clone https://github.com/ekstremedia/pi5-ai.git
-cd pi5-ai
+git clone https://github.com/ekstremedia/rpi5-birdcam-hailo-bioclip.git
+cd rpi5-birdcam-hailo-bioclip
 
 cp .env.example .env
 # Edit .env — set CAMERA_SOURCE, SPECIES_API_URL, etc.
@@ -78,7 +84,7 @@ Then open `http://PI_IP:8888` in a browser.
 | Endpoint | Description |
 |----------|-------------|
 | `/` | Live dashboard with stream, bird count, recent visitors |
-| `/stream` | Raw MJPEG stream with bounding box overlays |
+| `/stream` | Raw MJPEG stream (a series of JPEG images sent as video) with bounding box overlays |
 | `/label` | Web UI for manually labeling bird crops (training data) |
 | `/api/stats` | JSON: current birds, today's visits, FPS |
 | `/api/birds` | JSON: recent bird visits with species |
@@ -106,7 +112,7 @@ The video stream shows a status bar with:
 
 ## NUC (Classification + Relay)
 
-The NUC runs three Docker services that support the Pi and connect it to the public web.
+The NUC runs three Docker (a way to run apps in isolated containers) services that support the Pi and connect it to the public web.
 All files are in the [`nuc/`](nuc/) directory.
 
 | Service | Image | Purpose |
@@ -148,7 +154,7 @@ POLL_INTERVAL=5
 
 ### Species classification API
 
-The `species-api` service runs [BioCLIP](https://huggingface.co/imageomics/bioclip) as a Flask HTTP API.
+The `species-api` service runs [BioCLIP](https://huggingface.co/imageomics/bioclip) (an AI model trained on millions of biology images) as a Flask (lightweight Python web framework) HTTP API.
 When `bird_monitor.py` detects a bird, it POSTs the crop to `/classify` and gets back the species name in Norwegian.
 
 | Endpoint | Method | Description |
@@ -162,11 +168,11 @@ Low-confidence results (<70%) are automatically reclassified up to 3 times using
 
 ### Stream relay
 
-The `stream-relay` service reads the Pi's MJPEG stream, encodes it to H.264 with libx264 (ultrafast preset, zerolatency tune, 1.5 Mbps), and pushes it via RTMP to the VPS.
+The `stream-relay` service reads the Pi's MJPEG stream, encodes it to H.264 with libx264 (ultrafast preset, zerolatency tune, 1.5 Mbps), and pushes it via RTMP (a video streaming protocol) to the VPS.
 
 ### Stats pusher
 
-The `stats-pusher` service polls the Pi's `/api/stats` and `/api/birds` endpoints every 5 seconds and POSTs the combined data to the Laravel API. Laravel caches the stats and broadcasts them via [Reverb](https://reverb.laravel.com/) websockets to all connected browsers.
+The `stats-pusher` service polls the Pi's `/api/stats` and `/api/birds` endpoints every 5 seconds and POSTs the combined data to the Laravel (a PHP web framework) API. Laravel caches the stats and broadcasts them via [Reverb](https://reverb.laravel.com/) (Laravel's real-time WebSocket server) to all connected browsers.
 
 ---
 
@@ -180,7 +186,7 @@ Setup instructions are in [`vpssetup.md`](vpssetup.md).
 
 | Component | Purpose |
 |-----------|---------|
-| [mediamtx](https://github.com/bluenviron/mediamtx) v1.11.3 | Receives RTMP on :1935, serves WebRTC (WHEP) on :8889, HLS on :8888 |
+| [mediamtx](https://github.com/bluenviron/mediamtx) v1.11.3 | Receives RTMP on :1935, serves WebRTC/WHEP (a low-latency browser video protocol) on :8889, HLS (another streaming format — higher latency but wider support) on :8888 |
 | Apache2 reverse proxy | Proxies `/birdcam/live/whep` and `/birdcam/live/` through HTTPS |
 | Laravel + Inertia + Vue 3 | `/fuglekamera` page with WebRTC player + live stats sidebar |
 | [Laravel Reverb](https://reverb.laravel.com/) | Broadcasts bird stats to connected browsers in real time |
@@ -214,7 +220,7 @@ Species names follow the [IOC World Bird List](https://www.worldbirdnames.org/) 
 
 ## How Classification Works
 
-Unlike a traditional classifier with fixed output classes, BioCLIP uses zero-shot contrastive learning — it matches images against text descriptions.
+Unlike a traditional classifier with fixed output classes, BioCLIP uses zero-shot classification — it can identify things it wasn't explicitly trained on by matching images against text descriptions, rather than being limited to a fixed list baked into the model.
 
 1. At startup, species names are loaded and turned into text prompts ("a photo of a Great Tit", ...)
 2. All prompts are encoded into text embeddings (cached in memory)

@@ -525,3 +525,11 @@ docker compose ps:
 - [x] NUC relay streaming to VPS — confirmed working
 - [x] Real-time stats via Reverb websockets — confirmed working
 - [ ] HLS fallback in the Vue player for browsers without WebRTC
+
+### 2026-02-20 - README rewrite for beginners
+- Rewrote README.md to be approachable for non-technical readers
+- Added warm intro explaining it's a hobby/learning project
+- Added "Why three machines?" section explaining the Pi/NUC/VPS split
+- Inline-explained technical terms on first mention (Hailo, TOPS, COCO, BioCLIP, Docker, RTMP, MJPEG, etc.)
+- Kept all existing tables, code blocks, architecture diagram, and links
+- Updated git clone URL to new repo name: rpi5-birdcam-hailo-bioclip
