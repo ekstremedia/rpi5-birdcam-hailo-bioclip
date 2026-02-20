@@ -102,6 +102,9 @@ SPECIES_RECLASSIFY_INTERVAL = _env_float("SPECIES_RECLASSIFY_INTERVAL", 1.5)  # 
 SPECIES_RECLASSIFY_MAX = _env_int("SPECIES_RECLASSIFY_MAX", 3)  # max retries per bird
 SPECIES_LIST_PATH = _env("SPECIES_LIST_PATH", "/home/pi/ai/models/norwegian_species.txt")
 
+NETATMO_URL = _env("NETATMO_URL", "https://ekstremedia.no/api/netatmo/stations/2c4735da-abbe-425e-a2ba-1006e786554c")
+NETATMO_INTERVAL = _env_int("NETATMO_INTERVAL", 600)  # seconds between fetches
+
 # Fonts for PIL text rendering (supports æøå, unlike OpenCV putText)
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_LABEL = ImageFont.truetype(FONT_PATH, 20)    # bird labels on bboxes
@@ -440,6 +443,10 @@ class BirdMonitor:
         self.classify_last_time = {}  # track_id -> timestamp of last attempt
         self.last_health_check = 0
 
+        # Netatmo outdoor temperature
+        self.outdoor_temp = None  # float or None if never fetched
+        self._last_temp_fetch = 0
+
         os.makedirs(CROP_DIR, exist_ok=True)
 
     def start(self):
@@ -495,6 +502,10 @@ class BirdMonitor:
         self._health_thread = threading.Thread(target=self._health_check_loop, daemon=True)
         self._health_thread.start()
 
+        # Netatmo outdoor temperature
+        self._temp_thread = threading.Thread(target=self._temp_fetch_loop, daemon=True)
+        self._temp_thread.start()
+
     def _check_species_api(self):
         """Ping the remote species API health endpoint."""
         try:
@@ -518,6 +529,28 @@ class BirdMonitor:
         while self.running:
             time.sleep(SPECIES_HEALTH_INTERVAL)
             self._check_species_api()
+
+    def _fetch_outdoor_temp(self):
+        """Fetch outdoor temperature from Netatmo API."""
+        try:
+            req = urllib.request.Request(NETATMO_URL, method="GET")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read())
+                for module in data.get("modules", []):
+                    if module.get("type") == "Outdoor Module":
+                        temp = module.get("measurements", {}).get("Temperature")
+                        if temp is not None:
+                            self.outdoor_temp = float(temp)
+                            break
+        except Exception as e:
+            print(f"  Netatmo henting feilet: {e}", flush=True)
+
+    def _temp_fetch_loop(self):
+        """Periodically fetch outdoor temperature."""
+        self._fetch_outdoor_temp()
+        while self.running:
+            time.sleep(NETATMO_INTERVAL)
+            self._fetch_outdoor_temp()
 
     def stop(self):
         """Clean shutdown - waits for processing thread to finish first."""
@@ -817,10 +850,12 @@ class BirdMonitor:
         klokke = f"{dag} {now.day}. {mnd} {now.strftime('%H:%M:%S')}"
 
         api_icon = "●" if self.species_api_ok else "○"
+        temp_str = f"{self.outdoor_temp:.1f}°C" if self.outdoor_temp is not None else ""
         line1 = (f"{klokke}  |  "
                  f"Fugler: {self.current_bird_count}  |  "
                  f"I dag: {self.today_visits} besøk  |  "
-                 f"FPS: {self.fps:.0f}  |  "
+                 + (f"{temp_str}  |  " if temp_str else "")
+                 + f"FPS: {self.fps:.0f}  |  "
                  f"API {api_icon}")
 
         # Species summary from currently tracked birds

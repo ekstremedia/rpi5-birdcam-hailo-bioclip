@@ -1,95 +1,77 @@
 # Bird Feeder Camera
 
-AI-powered bird feeder monitor that detects, tracks, and identifies bird species in real time.
+AI-powered bird feeder monitor that detects, tracks, and identifies bird species in real time — then streams it live to the web.
 
-Two machines work together: a **Raspberry Pi 5** handles detection and tracking at the feeder,
-while a **classification server** runs the species identification model over the network.
+Three machines work together: a **Raspberry Pi 5** runs real-time detection at the feeder, an **Intel NUC** handles species classification and stream relay, and a **VPS** serves the live stream to the public.
 
 ## Architecture
 
 ```text
-┌─────────────────────────────┐         ┌──────────────────────────────┐
-│  Raspberry Pi 5             │         │  Classification Server       │
-│                             │         │                              │
-│  Camera (IMX477 / Elgato)   │         │  BioCLIP (ViT-B/16)         │
-│  → YOLOv8s on Hailo-8      │  HTTP   │  via open_clip + Flask       │
-│  → Bird detected? Crop it   ├────────►│  → Species identification   │
-│  → Centroid tracker         │  ~0.2s  │  → Norwegian name returned  │
-│  → Web dashboard :8888      │◄────────┤                              │
-│  → SQLite logging           │         │  Docker · port 5555          │
-└─────────────────────────────┘         └──────────────────────────────┘
+Pi 5 (192.168.1.176)          NUC (192.168.1.64)           VPS (ekstremedia.no)
+────────────────────          ────────────────────          ────────────────────
+Canon G25 → Elgato            species-api :5555
+  → YOLOv8s on Hailo-8         BioCLIP classification
+  → Centroid tracker
+  → Web dashboard :8888
+     │                                                           mediamtx
+     ├─ /stream (MJPEG) ──────→ stream-relay ──── RTMP ────→   WebRTC / HLS
+     ├─ /api/stats      ──────→ stats-pusher ── HTTPS ─────→ Laravel → Reverb
+     ├─ /api/birds      ──────→                               → /fuglekamera
+     └─ /classify (POST) ←────  BioCLIP API
 ```
 
-**Detection**: YOLOv8s runs on the Hailo-8 AI accelerator at 30 FPS, filtering for COCO class 14 (bird).
+**Live at**: [ekstremedia.no/fuglekamera](https://ekstremedia.no/fuglekamera)
 
-**Tracking**: Centroid-based tracker counts arrivals and departures, logs each visit to SQLite.
-
-**Classification**: When a bird arrives, its crop is sent to the classification server. BioCLIP
-(zero-shot, 42 Norwegian species) returns the species name in ~0.2s.
-
-**Dashboard**: Live MJPEG stream with bounding boxes, species labels, visit counter, and FPS overlay.
+---
 
 ## Raspberry Pi 5
+
+The Pi runs `bird_monitor.py` — the main application that captures video, detects birds, tracks them, and serves a live dashboard.
 
 ### Hardware
 
 - Raspberry Pi 5 (8GB)
-- Hailo-8 AI HAT+ (26 TOPS neural accelerator)
-- Camera: Raspberry Pi HQ Camera (IMX477) or Elgato Cam Link 4K
+- [Hailo-8 AI HAT+](https://www.raspberrypi.com/products/ai-hat-plus/) (26 TOPS neural accelerator)
+- Camera: Canon LEGRIA HF G25 via [Elgato Cam Link 4K](https://www.elgato.com/cam-link-4k) (HDMI capture)
+- Backup camera: Raspberry Pi HQ Camera (IMX477, CSI)
 - OS: Debian 13 (trixie)
 
-### Files
+### Detection pipeline
 
-| File | Description |
-|------|-------------|
-| `bird_monitor.py` | Main application — detection, tracking, web dashboard |
-| `stream.py` | Simple MJPEG stream with Hailo AI overlay (fallback/testing) |
-| `species_classifier.py` | Local BioCLIP classifier module (unused now, kept for reference) |
-| `models/norwegian_species.txt` | 42 bird species (English + Norwegian names) |
-| `.env.example` | Configuration template |
+1. Camera captures 1920x1080 @ 25fps via Elgato Cam Link
+2. Each frame is resized to 640x640 and fed to **YOLOv8s** running on the Hailo-8
+3. Detections are filtered for COCO class 14 (bird), confidence > 0.4
+4. A centroid-based tracker assigns IDs, counts arrivals and departures
+5. On bird arrival, the crop is sent to the NUC for species classification
+6. Results are logged to SQLite, crops saved to disk
 
 ### Setup
 
 ```bash
-# Clone the repo
 git clone https://github.com/ekstremedia/pi5-ai.git
 cd pi5-ai
 
-# Copy and edit config
 cp .env.example .env
-# Edit .env — set CAMERA_SOURCE, SPECIES_API_URL, paths, etc.
+# Edit .env — set CAMERA_SOURCE, SPECIES_API_URL, etc.
 
-# Required system packages (should already be installed on Pi OS)
+# Required system packages (should already be on Pi OS)
 sudo apt install python3-picamera2 python3-opencv python3-pil
+
+python3 bird_monitor.py
 ```
 
-### Configuration
+Then open `http://PI_IP:8888` in a browser.
 
-All settings are in `.env` (see `.env.example` for defaults):
+### Configuration (.env)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CAMERA_SOURCE` | `elgato` | `elgato` or `picamera2` |
-| `SPECIES_API_URL` | `http://192.168.1.64:5555` | Classification server address |
+| `SPECIES_API_URL` | `http://192.168.1.64:5555` | NUC classification server |
 | `PORT` | `8888` | Web dashboard port |
 | `CONFIDENCE_THRESHOLD` | `0.4` | Minimum detection confidence |
 | `CROP_DIR` | `/home/pi/ai/bird_crops` | Where bird crop images are saved |
 | `DB_PATH` | `/home/pi/ai/birds.db` | SQLite database path |
-
-### Running
-
-```bash
-# Start the bird monitor
-python3 bird_monitor.py
-
-# Run in background
-nohup python3 bird_monitor.py > /tmp/bird-monitor.log 2>&1 &
-
-# Stop
-pkill -f bird_monitor.py
-```
-
-Then open `http://PI_IP:8888` in a browser.
 
 ### Web dashboard
 
@@ -99,65 +81,123 @@ Then open `http://PI_IP:8888` in a browser.
 | `/stream` | Raw MJPEG stream with bounding box overlays |
 | `/label` | Web UI for manually labeling bird crops (training data) |
 | `/api/stats` | JSON: current birds, today's visits, FPS |
-| `/api/birds` | JSON: recent bird visits |
+| `/api/birds` | JSON: recent bird visits with species |
 
 ### HUD overlay
 
-The video stream shows:
-- Green bounding boxes around detected birds with species labels
-- **Fugler nå**: Current bird count
-- **I dag**: Today's visit count
-- **FPS**: Processing frame rate
-- **Klassifiseringsmotor: På/Frakoblet**: Whether the classification server is reachable
+The video stream shows a status bar with:
+- Norwegian date/time (e.g. "tor 20. feb 19:08:54")
+- Current bird count and today's visit total
+- Processing FPS
+- Classification server status (På/Frakoblet)
+- Species summary when birds are present (e.g. "2 blåmeis, 1 spettmeis")
 
-## Classification Server
+### Files (Pi)
 
-A separate machine (any x86 box with a few GB of RAM) runs species classification as a
-Dockerized HTTP API. This offloads the ~600MB BioCLIP model from the Pi.
+| File | Description |
+|------|-------------|
+| `bird_monitor.py` | Main application — detection, tracking, classification, web dashboard |
+| `stream.py` | Simple MJPEG stream with Hailo AI overlay (fallback/testing) |
+| `species_classifier.py` | Local BioCLIP classifier module (unused, kept for reference) |
+| `models/norwegian_species.txt` | 42 bird species (English + Norwegian names) |
+| `.env.example` | Configuration template |
 
-See [birdcam/CLASSIFICATION.md](https://github.com/ekstremedia/pi5-ai/blob/main/birdcam/CLASSIFICATION.md)
-for full details on the model, API reference, and setup.
+---
 
-### Quick setup
+## NUC (Classification + Relay)
 
-The classification server files live in `/home/terje/birdcam/` (not in this repo — it runs
-on a different machine).
+The NUC runs three Docker services that support the Pi and connect it to the public web.
+All files are in the [`nuc/`](nuc/) directory.
+
+| Service | Image | Purpose |
+|---------|-------|---------|
+| `species-api` | Custom (BioCLIP + Flask) | Species classification API on port 5555 |
+| `stream-relay` | linuxserver/ffmpeg | Relays Pi MJPEG → H.264 → RTMP to VPS |
+| `stats-pusher` | python:3.11-slim | Polls Pi stats every 5s, pushes to Laravel |
+
+### Setup
 
 ```bash
-# Create directory and files (see CLASSIFICATION.md for contents)
-mkdir -p ~/birdcam && cd ~/birdcam
+cd nuc
+cp .env.example .env
+# Edit .env — set HF_TOKEN, PI_STREAM, VPS_RTMP, LARAVEL_URL, LARAVEL_TOKEN
 
-# Set HuggingFace token for model download
-echo "HF_TOKEN=hf_your_token_here" > .env
-
-# Build (downloads PyTorch + BioCLIP model, takes a few minutes)
-docker compose build
-
-# Start
 docker compose up -d
 
 # Verify
+docker compose ps
 curl http://localhost:5555/health
-# → {"status":"ok","model":"bioclip","species_count":42}
 ```
 
-### API
+### Configuration (nuc/.env)
+
+```bash
+# BioCLIP model download (build-time only)
+HF_TOKEN=hf_your_token
+
+# Stream relay
+PI_STREAM=http://192.168.1.176:8888/stream
+VPS_RTMP=rtmp://185.14.97.143:1935/birdcam/live
+
+# Stats pusher
+PI_URL=http://192.168.1.176:8888
+LARAVEL_URL=https://ekstremedia.no
+LARAVEL_TOKEN=your_shared_secret_token
+POLL_INTERVAL=5
+```
+
+### Species classification API
+
+The `species-api` service runs [BioCLIP](https://huggingface.co/imageomics/bioclip) as a Flask HTTP API.
+When `bird_monitor.py` detects a bird, it POSTs the crop to `/classify` and gets back the species name in Norwegian.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/classify` | POST | Send JPEG bytes, get `{species, species_en, confidence, inference_time}` |
-| `/health` | GET | Status + species count |
+| `/classify` | POST | Send JPEG bytes → `{species, species_en, confidence, inference_time}` |
+| `/health` | GET | Status check → `{status, model, species_count}` |
 
-### How classification works
+Classification takes ~0.2s on the NUC (i7) vs ~4s on the Pi 5.
 
-BioCLIP is a CLIP model fine-tuned on 10M biological images. It matches bird crops against
-text prompts ("a photo of a Great Tit", "a photo of a Blue Tit", ...) using cosine similarity.
-No training needed — just list species names in `norwegian_species.txt`.
+Low-confidence results (<70%) are automatically reclassified up to 3 times using fresh crops, keeping the best result.
 
-## Species list
+### Stream relay
 
-The file `models/norwegian_species.txt` defines which species the system recognizes.
-Format: `English Name | Norsk navn`, one per line.
+The `stream-relay` service reads the Pi's MJPEG stream, encodes it to H.264 with libx264 (ultrafast preset, zerolatency tune, 1.5 Mbps), and pushes it via RTMP to the VPS.
+
+### Stats pusher
+
+The `stats-pusher` service polls the Pi's `/api/stats` and `/api/birds` endpoints every 5 seconds and POSTs the combined data to the Laravel API. Laravel caches the stats and broadcasts them via [Reverb](https://reverb.laravel.com/) websockets to all connected browsers.
+
+---
+
+## VPS (Public Stream)
+
+The VPS runs [mediamtx](https://github.com/bluenviron/mediamtx) to receive the RTMP stream and serve it to browsers, plus a Laravel/Vue application for the public page.
+
+Setup instructions are in [`vpssetup.md`](vpssetup.md).
+
+### Components
+
+| Component | Purpose |
+|-----------|---------|
+| [mediamtx](https://github.com/bluenviron/mediamtx) v1.11.3 | Receives RTMP on :1935, serves WebRTC (WHEP) on :8889, HLS on :8888 |
+| Apache2 reverse proxy | Proxies `/birdcam/live/whep` and `/birdcam/live/` through HTTPS |
+| Laravel + Inertia + Vue 3 | `/fuglekamera` page with WebRTC player + live stats sidebar |
+| [Laravel Reverb](https://reverb.laravel.com/) | Broadcasts bird stats to connected browsers in real time |
+
+### Public page features
+
+- WebRTC video player using WHEP protocol (lowest latency)
+- Live stats sidebar: current bird count, today's visits, species list with confidence
+- Real-time updates via Reverb websockets — no polling
+- LIVE/OFFLINE badge based on stream connectivity
+- All text in Norwegian
+
+---
+
+## Species List
+
+The file `models/norwegian_species.txt` (Pi) and `nuc/norwegian_species.txt` (NUC) define which species the system recognizes. Format: `English Name | Norsk navn`, one per line.
 
 ```text
 Great Tit | Kjøttmeis
@@ -166,10 +206,62 @@ Eurasian Magpie | Skjære
 ...
 ```
 
-42 common Norwegian feeder birds are included. To add a species, just add a line — the
-classification server hot-reloads the file automatically.
+42 common Norwegian feeder birds are included. To add a species, just add a line — the classification server hot-reloads the file automatically. No retraining needed.
 
-## Project log
+Species names follow the [IOC World Bird List](https://www.worldbirdnames.org/) (English) and [Norsk Ornitologisk Forening](https://www.birdlife.no/) (Norwegian).
+
+---
+
+## How Classification Works
+
+Unlike a traditional classifier with fixed output classes, BioCLIP uses zero-shot contrastive learning — it matches images against text descriptions.
+
+1. At startup, species names are loaded and turned into text prompts ("a photo of a Great Tit", ...)
+2. All prompts are encoded into text embeddings (cached in memory)
+3. When a bird crop arrives, it's encoded into an image embedding
+4. Cosine similarity is computed between the image and all species text embeddings
+5. Softmax gives a probability for each species — the top match is returned
+
+This means adding a new species is just adding one line to a text file. No model retraining.
+
+---
+
+## Credits and Acknowledgments
+
+### Models
+
+- **[YOLOv8s](https://github.com/ultralytics/ultralytics)** by Ultralytics — real-time object detection model running on the Hailo-8 accelerator. Trained on the [COCO dataset](https://cocodataset.org/) (80 classes including "bird"). License: AGPL-3.0.
+
+- **[BioCLIP](https://huggingface.co/imageomics/bioclip)** by the [Imageomics Institute](https://imageomics.org/) — vision foundation model for biological image classification, built on OpenAI's CLIP (ViT-B/16) and fine-tuned on the [TreeOfLife-10M](https://huggingface.co/datasets/imageomics/TreeOfLife-10M) dataset (10M+ biological images, 450K+ taxa). CVPR 2024 Best Student Paper. License: MIT.
+  - Paper: [BioCLIP: A Vision Foundation Model for the Tree of Life](https://arxiv.org/abs/2311.18803)
+  - Authors: Samuel Stevens, Jiaman Wu, Matthew J. Thompson, Elizabeth G. Campolongo, Chan Hee Song, David Edward Carlyn, Li Dong, Wasila M. Dahdul, Charles Stewart, Tanya Berger-Wolf, Wei-Lun Chao, Yu Su — The Ohio State University
+  - GitHub: [Imageomics/BioCLIP](https://github.com/Imageomics/BioCLIP)
+
+### Libraries and Tools
+
+- **[OpenCLIP](https://github.com/mlfoundations/open_clip)** — open source implementation of CLIP used to run BioCLIP. License: MIT.
+- **[Hailo SDK](https://hailo.ai/)** — neural network compiler and runtime for the Hailo-8 AI accelerator.
+- **[picamera2](https://github.com/raspberrypi/picamera2)** — Python interface for Raspberry Pi cameras.
+- **[OpenCV](https://opencv.org/)** — computer vision library for image processing and video capture.
+- **[Flask](https://flask.palletsprojects.com/)** — lightweight Python web framework for the classification API.
+- **[mediamtx](https://github.com/bluenviron/mediamtx)** by bluenviron — zero-dependency media server for RTMP, WebRTC, HLS, and more. License: MIT.
+- **[FFmpeg](https://ffmpeg.org/)** — video encoding and streaming toolkit.
+- **[hls.js](https://github.com/video-dev/hls.js)** — HLS client for browsers without native support.
+- **[Laravel Reverb](https://reverb.laravel.com/)** — first-party WebSocket server for Laravel.
+
+### Datasets
+
+- **[COCO](https://cocodataset.org/)** (Common Objects in Context) — object detection dataset used to train YOLOv8.
+- **[TreeOfLife-10M](https://huggingface.co/datasets/imageomics/TreeOfLife-10M)** — 10M biological images from iNaturalist, BIOSCAN-1M, and Encyclopedia of Life, used to train BioCLIP.
+
+### Platforms
+
+- **[Hugging Face](https://huggingface.co/)** — model hosting and distribution for BioCLIP.
+- **[Raspberry Pi](https://www.raspberrypi.com/)** — Pi 5 hardware and software ecosystem.
+
+---
+
+## Project Log
 
 Detailed build log with discoveries, architecture decisions, and implementation notes:
 [BIRD_PROJECT_LOG.md](BIRD_PROJECT_LOG.md)

@@ -60,6 +60,11 @@ paths:
     source: publisher
 ```
 
+**Security**: Restrict RTMP port to the NUC's IP so only it can publish:
+```bash
+sudo ufw allow from <NUC_PUBLIC_IP> to any port 1935 proto tcp
+```
+
 ## 3. systemd service
 
 Create `/etc/systemd/system/mediamtx.service`:

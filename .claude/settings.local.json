@@ -6,7 +6,9 @@
       "Bash(python3:*)",
       "Bash(sudo ss:*)",
       "Bash(ss:*)",
-      "Bash(v4l2-ctl:*)"
+      "Bash(v4l2-ctl:*)",
+      "Bash(git pull:*)",
+      "WebFetch(domain:ekstremedia.no)"
     ]
   }
 }
