@@ -418,6 +418,44 @@ http://pi:8888/api/birds      POSTs to Laravel ──────────→
 5. `docker compose up -d` on NUC
 6. Test at https://ekstremedia.no/fuglekamera
 
+### 2026-02-20 - VPS Deployed: mediamtx + Apache + Live Stream!
+
+Deployed the full streaming infrastructure on the VPS (185.14.97.143, Debian 11) and confirmed end-to-end live stream working.
+
+#### What was set up
+1. **mediamtx v1.11.3** installed as systemd service — receives RTMP from NUC, serves WebRTC + HLS
+2. **Apache2 reverse proxy** — added proxy rules to existing SSL VirtualHost (no new subdomains)
+3. **Vue page** (`Fuglekamera.vue`) — WebRTC player with WHEP protocol at `/fuglekamera`
+4. **Laravel route** — `GET /fuglekamera` renders the Inertia page
+
+#### Key learnings
+- **Apache + Laravel proxy gotcha**: `ProxyPass` inside `<Location>` blocks loses to Laravel's `.htaccess` rewrite rules — requests hit Laravel (404) instead of mediamtx. Fix: put `ProxyPass` directives directly in the VirtualHost block (outside `<Location>`), which runs before filesystem handlers.
+- **No subdomain needed**: Using `/birdcam/live/` paths on the main domain works perfectly. Apache proxies `/birdcam/live/whep` → mediamtx:8889 and `/birdcam/live/` → mediamtx:8888. Laravel handles `/fuglekamera` as a normal Inertia route.
+- **mediamtx just works**: Single binary, YAML config, systemd service. Receives RTMP, serves WebRTC/HLS/RTSP/SRT out of the box.
+
+#### Stream flow (confirmed working)
+```
+Pi 5 → MJPEG → NUC → ffmpeg H.264 → RTMP → VPS mediamtx → WebRTC → Browser
+```
+
+#### Verified
+- mediamtx receiving H264 stream (`ready: true`, continuous bytes received)
+- WHEP endpoint reachable through Apache (returns 400 on bad SDP = correct)
+- `/fuglekamera` page loads with WebRTC player
+- Live stream plays in browser
+
+#### Files changed on VPS
+| File | Change |
+|------|--------|
+| `/usr/local/bin/mediamtx` | Installed binary |
+| `/etc/mediamtx.yml` | Stream config (RTMP in, WebRTC/HLS out) |
+| `/etc/systemd/system/mediamtx.service` | Auto-start service |
+| `/etc/apache2/sites-enabled/000-default-le-ssl.conf` | Added proxy rules |
+| `routes/web.php` | Added `/fuglekamera` route |
+| `resources/js/pages/Public/Fuglekamera.vue` | WebRTC player page |
+
+Full VPS setup documented in `vpssetup.md`.
+
 ## Next Steps
 - [ ] Point camera at bird feeder and test species identification with real birds
 - [ ] Disable Canon G25 OSD overlays (FUNC → MENU → Display Setup → Output Onscreen Displays → Off)
@@ -431,7 +469,9 @@ http://pi:8888/api/birds      POSTs to Laravel ──────────→
 - [x] Switch to Canon LEGRIA via Elgato Cam Link
 - [ ] Set up auto-start on boot (systemd service)
 - [x] Stream relay to VPS — ffmpeg + stats_pusher on NUC
-- [x] Public web page — fuglekamera.blade.php with WebRTC/HLS + Reverb stats
-- [ ] Deploy mediamtx on VPS
-- [ ] Deploy Laravel birdcam code to ekstremedia.no
-- [ ] Start NUC relay services and test end-to-end
+- [x] Public web page — Fuglekamera.vue with WebRTC player
+- [x] Deploy mediamtx on VPS
+- [x] Deploy Laravel/Vue birdcam page to ekstremedia.no
+- [x] NUC relay streaming to VPS — confirmed working
+- [ ] Add real-time stats overlay (bird count, species) via Reverb websockets
+- [ ] HLS fallback in the Vue player for browsers without WebRTC
