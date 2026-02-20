@@ -456,6 +456,39 @@ Pi 5 → MJPEG → NUC → ffmpeg H.264 → RTMP → VPS mediamtx → WebRTC →
 
 Full VPS setup documented in `vpssetup.md`.
 
+### 2026-02-20 - Full Pipeline Live: Stream + Stats + Reverb
+
+All three NUC services running via docker-compose, full end-to-end pipeline confirmed working.
+
+#### NUC services (`/home/terje/birdcam/`)
+```text
+docker compose ps:
+  species-api    — BioCLIP classification (port 5555)
+  stream-relay   — ffmpeg MJPEG→H.264→RTMP to VPS (1.5 Mbps, 25fps)
+  stats-pusher   — polls Pi every 5s, POSTs to Laravel (200 OK)
+```
+
+#### Stats pusher confirmed
+- Polls Pi `/api/stats` + `/api/birds` every 5 seconds
+- POSTs combined JSON to `https://ekstremedia.no/api/birdcam/stats`
+- Laravel caches stats and broadcasts via Reverb on public `birdcam` channel
+- Vue page at `/fuglekamera` receives live updates via websocket
+
+#### VPS Laravel endpoints
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/birdcam/stats` | POST | Receives stats from NUC, caches + broadcasts via Reverb |
+| `/api/birdcam/status` | GET | Returns cached stats (used on initial page load) |
+| `/fuglekamera` | GET | Public Vue page with WebRTC player + live stats sidebar |
+
+#### Files on VPS
+| File | Purpose |
+|------|---------|
+| `app/Events/BirdcamStatsUpdated.php` | Reverb broadcast event |
+| `app/Http/Controllers/Api/BirdcamController.php` | Receive + serve stats |
+| `routes/api.php` | Added birdcam API routes |
+| `resources/js/pages/Public/Fuglekamera.vue` | WebRTC player + stats sidebar |
+
 ## Next Steps
 - [ ] Point camera at bird feeder and test species identification with real birds
 - [ ] Disable Canon G25 OSD overlays (FUNC → MENU → Display Setup → Output Onscreen Displays → Off)
@@ -473,5 +506,5 @@ Full VPS setup documented in `vpssetup.md`.
 - [x] Deploy mediamtx on VPS
 - [x] Deploy Laravel/Vue birdcam page to ekstremedia.no
 - [x] NUC relay streaming to VPS — confirmed working
-- [ ] Add real-time stats overlay (bird count, species) via Reverb websockets
+- [x] Real-time stats via Reverb websockets — confirmed working
 - [ ] HLS fallback in the Vue player for browsers without WebRTC
