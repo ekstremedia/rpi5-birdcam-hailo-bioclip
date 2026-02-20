@@ -97,6 +97,9 @@ CROP_SAVE_INTERVAL = _env_float("CROP_SAVE_INTERVAL", 3.0)
 SPECIES_API_URL = _env("SPECIES_API_URL", "http://192.168.1.64:5555")
 SPECIES_API_TIMEOUT = _env_int("SPECIES_API_TIMEOUT", 5)
 SPECIES_HEALTH_INTERVAL = _env_int("SPECIES_HEALTH_INTERVAL", 15)
+SPECIES_RECLASSIFY_THRESHOLD = _env_float("SPECIES_RECLASSIFY_THRESHOLD", 0.70)
+SPECIES_RECLASSIFY_INTERVAL = _env_float("SPECIES_RECLASSIFY_INTERVAL", 1.5)  # seconds between retries
+SPECIES_RECLASSIFY_MAX = _env_int("SPECIES_RECLASSIFY_MAX", 3)  # max retries per bird
 SPECIES_LIST_PATH = _env("SPECIES_LIST_PATH", "/home/pi/ai/models/norwegian_species.txt")
 
 # Fonts for PIL text rendering (supports æøå, unlike OpenCV putText)
@@ -433,6 +436,8 @@ class BirdMonitor:
         # Remote species classification API (BioCLIP on NUC)
         self.species_api_ok = False  # True when NUC API is reachable
         self.species_labels = {}  # track_id -> (species, confidence)
+        self.classify_attempts = {}  # track_id -> number of classify attempts
+        self.classify_last_time = {}  # track_id -> timestamp of last attempt
         self.last_health_check = 0
 
         os.makedirs(CROP_DIR, exist_ok=True)
@@ -598,6 +603,8 @@ class BirdMonitor:
                             max(0, int(bbox[0])):min(frame_rgb.shape[1], int(bbox[2]))
                         ].copy()
                         if crop_copy.shape[0] >= 20 and crop_copy.shape[1] >= 20:
+                            self.classify_attempts[tid] = 1
+                            self.classify_last_time[tid] = time.time()
                             threading.Thread(
                                 target=self._classify_bird_async,
                                 args=(tid, crop_copy),
@@ -607,7 +614,36 @@ class BirdMonitor:
                 for tid in self.tracker.departures:
                     self.db.log_visit_end(tid, now_str)
                     self.species_labels.pop(tid, None)
+                    self.classify_attempts.pop(tid, None)
+                    self.classify_last_time.pop(tid, None)
                     print(f"  [{now_str}] Fugl forlot. spor={tid}", flush=True)
+
+                # Reclassify low-confidence birds that are still tracked
+                if self.species_api_ok:
+                    now_time = time.time()
+                    for tid in list(self.tracker.objects.keys()):
+                        if tid not in self.species_labels:
+                            continue
+                        sp, conf = self.species_labels[tid]
+                        attempts = self.classify_attempts.get(tid, 1)
+                        last_t = self.classify_last_time.get(tid, 0)
+                        if (conf < SPECIES_RECLASSIFY_THRESHOLD
+                                and attempts < SPECIES_RECLASSIFY_MAX
+                                and now_time - last_t >= SPECIES_RECLASSIFY_INTERVAL):
+                            bbox = self.tracker.bboxes.get(tid)
+                            if bbox:
+                                crop_copy = frame_rgb[
+                                    max(0, int(bbox[1])):min(frame_rgb.shape[0], int(bbox[3])),
+                                    max(0, int(bbox[0])):min(frame_rgb.shape[1], int(bbox[2]))
+                                ].copy()
+                                if crop_copy.shape[0] >= 20 and crop_copy.shape[1] >= 20:
+                                    self.classify_last_time[tid] = now_time
+                                    self.classify_attempts[tid] = attempts + 1
+                                    threading.Thread(
+                                        target=self._classify_bird_async,
+                                        args=(tid, crop_copy),
+                                        daemon=True,
+                                    ).start()
 
                 # 7. Draw overlays and encode JPEG
                 # picamera2 "RGB888" actually delivers BGR on Pi 5, so no conversion needed
@@ -771,19 +807,46 @@ class BirdMonitor:
             cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (100, 100, 100), 1)
             text_draws.append((d["class_name"], x1, y1 - 4, FONT_SMALL, (100, 100, 100)))
 
-        # Status overlay (top-left)
-        lines = [
-            f"Fugler nå: {self.current_bird_count}",
-            f"I dag: {self.today_visits} besøk",
-            f"FPS: {self.fps:.1f}",
-            f"Klassifiseringsmotor: {'På' if self.species_api_ok else 'Frakoblet'}",
-        ]
-        y = 10
-        for line in lines:
-            tw, th = pil_text_size(line, FONT_HUD)
-            cv2.rectangle(frame_bgr, (8, y), (8 + tw + 12, y + th + 8), (0, 0, 0), -1)
-            text_draws.append((line, 14, y + 2, FONT_HUD, (78, 204, 163)))
-            y += th + 14
+        # Status bar (two lines across the top, 70% transparent black)
+        DAGER = ["man", "tir", "ons", "tor", "fre", "lør", "søn"]
+        MAANEDER = ["jan", "feb", "mar", "apr", "mai", "jun",
+                     "jul", "aug", "sep", "okt", "nov", "des"]
+        now = datetime.now()
+        dag = DAGER[now.weekday()]
+        mnd = MAANEDER[now.month - 1]
+        klokke = f"{dag} {now.day}. {mnd} {now.strftime('%H:%M:%S')}"
+
+        api_icon = "●" if self.species_api_ok else "○"
+        line1 = (f"{klokke}  |  "
+                 f"Fugler: {self.current_bird_count}  |  "
+                 f"I dag: {self.today_visits} besøk  |  "
+                 f"FPS: {self.fps:.0f}  |  "
+                 f"API {api_icon}")
+
+        # Species summary from currently tracked birds
+        species_counts = {}
+        for tid_key in self.tracker.objects:
+            if tid_key in self.species_labels:
+                sp_name = self.species_labels[tid_key][0].split("(")[0].strip()
+                species_counts[sp_name] = species_counts.get(sp_name, 0) + 1
+        if species_counts:
+            parts = [f"{cnt} {name}" for name, cnt in sorted(species_counts.items(), key=lambda x: -x[1])]
+            line2 = ", ".join(parts)
+        else:
+            line2 = ""
+
+        _, th1 = pil_text_size(line1, FONT_HUD)
+        bar_h = th1 + 12
+        if line2:
+            _, th2 = pil_text_size(line2, FONT_LABEL)
+            bar_h += th2 + 6
+
+        # Darken the bar region in-place (70% opacity black = multiply by 0.3)
+        frame_bgr[0:bar_h, :] = (frame_bgr[0:bar_h, :] * 0.3).astype(np.uint8)
+
+        text_draws.append((line1, 8, 4, FONT_HUD, (78, 204, 163)))
+        if line2:
+            text_draws.append((line2, 8, th1 + 10, FONT_LABEL, (220, 220, 220)))
 
         # Render all text in one PIL pass
         img_pil = Image.fromarray(frame_bgr)
@@ -829,6 +892,7 @@ class BirdMonitor:
         """Classify a bird by sending the crop to the remote NUC API.
 
         Called from a daemon thread so the video loop never blocks.
+        Only updates the label if the new confidence is higher than the existing one.
         """
         try:
             _, jpeg_buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
@@ -847,13 +911,27 @@ class BirdMonitor:
             confidence = result.get("confidence", 0)
             inf_time = result.get("inference_time", 0)
 
-            if species:
-                self.species_labels[track_id] = (species, confidence)
-                self.db.update_visit_species(track_id, species)
+            if not species:
+                return
+
+            # Only update if better than existing classification
+            old = self.species_labels.get(track_id)
+            attempt = self.classify_attempts.get(track_id, 1)
+            if old and old[1] >= confidence:
                 print(
-                    f"  [art] spor={track_id} → {species} ({confidence:.0%}) [{inf_time:.2f}s]",
+                    f"  [art] spor={track_id} forsøk {attempt}: {species} ({confidence:.0%}) "
+                    f"← beholdt {old[0]} ({old[1]:.0%})",
                     flush=True,
                 )
+                return
+
+            self.species_labels[track_id] = (species, confidence)
+            self.db.update_visit_species(track_id, species)
+            retry_tag = f" forsøk {attempt}" if attempt > 1 else ""
+            print(
+                f"  [art] spor={track_id}{retry_tag} → {species} ({confidence:.0%}) [{inf_time:.2f}s]",
+                flush=True,
+            )
         except Exception as e:
             print(f"  Feil ved artsklassifisering: {e}", flush=True)
 
