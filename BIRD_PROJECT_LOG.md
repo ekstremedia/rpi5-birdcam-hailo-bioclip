@@ -298,11 +298,48 @@ curl localhost:5555/health    # Health check
 curl -X POST --data-binary @image.jpg localhost:5555/classify  # Classify
 ```
 
+### 2026-02-20 - Canon LEGRIA HF G25 via Elgato Cam Link 4K
+
+Replaced the Pi HQ Camera (CSI) with a Canon LEGRIA HF G25 camcorder connected via mini HDMI → Elgato Cam Link 4K → USB 3.0.
+
+#### Camera setup
+- Elgato Cam Link 4K detected at USB 3.0 (5 Gbps), outputs YUYV 1920x1080 @ 25fps
+- Uses stable device path: `/dev/v4l/by-id/usb-Elgato_Cam_Link_4K_...-video-index0` (survives re-enumeration)
+- OpenCV `VideoCapture` with `CAP_V4L2` backend (GStreamer backend can't open by-id paths)
+- `bird_monitor.py` now supports both `elgato` and `picamera2` camera sources via config
+
+#### Performance
+- YUYV raw decode: ~17ms per 1080p frame (40ms if camera is idle/buffering)
+- Total pipeline at 1080p: capture + Hailo + overlays + JPEG ≈ 44ms → **~22 FPS**
+- BioCLIP was eating all CPU when loading on the Pi (~2 min startup) — disabled locally
+- Species classification now runs on NUC via HTTP API (~0.2s per bird)
+
+#### Overlay redesign
+- Replaced 4-line stacked HUD with single-line status bar across the top
+- Norwegian date/time (e.g. "tor 20. feb 19:08:54"), bird count, visit count, FPS, API status
+- Species summary line below (e.g. "2 blåmeis, 1 spettmeis") when birds are present
+- 70% transparent black background (numpy multiply, not PIL RGBA — faster)
+
+#### Reclassification for low-confidence detections
+- Birds classified below 70% confidence get up to 3 reclassification attempts
+- Retries happen every 1.5s using fresh crops (bird may be in better angle)
+- Only updates the label if the new confidence is higher than the existing one
+- Config: `SPECIES_RECLASSIFY_THRESHOLD`, `SPECIES_RECLASSIFY_INTERVAL`, `SPECIES_RECLASSIFY_MAX`
+
+#### Configuration via .env
+- All settings now configurable via `.env` file (loaded at startup)
+- Camera source, device path, resolution, API URL, thresholds, etc.
+- No code changes needed to switch between cameras or adjust parameters
+
 ## Next Steps
 - [ ] Point camera at bird feeder and test species identification with real birds
+- [ ] Disable Canon G25 OSD overlays (FUNC → MENU → Display Setup → Output Onscreen Displays → Off)
 - [x] Add species classification (Phase 2) — BioCLIP zero-shot
 - [x] Add retraining pipeline for learning new species (Phase 3)
 - [x] Norwegian translation of all user-facing text
 - [x] Web-based labeling UI at `/label` for building training data
+- [x] Move BioCLIP to NUC as remote API
+- [x] Switch to Canon LEGRIA via Elgato Cam Link
 - [ ] Set up auto-start on boot (systemd service)
-- [ ] Add daily/weekly bird statistics to dashboard
+- [ ] Stream relay to VPS (Phase 3 of PLAN.md)
+- [ ] Public web page with WebRTC (Phase 5 of PLAN.md)

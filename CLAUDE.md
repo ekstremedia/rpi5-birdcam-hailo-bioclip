@@ -5,13 +5,14 @@ Raspberry Pi 5 + AI HAT+ (Hailo-8) project to recognize and count birds at a bir
 
 ## Current status
 - AI HAT+ installed and detected (Hailo-8, fw 4.23.0)
-- IMX477 HQ Camera connected and working (1280x960 @ 30fps)
-- `bird_monitor.py` — full detection + tracking + species classification + web dashboard
-- Running YOLOv8s on Hailo at 30 FPS, filtering for birds (COCO class 14)
-- Species classification via EfficientNet-B7 ONNX (556 species, ~4s per classification on arrival)
+- Camera: Canon LEGRIA HF G25 via Elgato Cam Link 4K (1920x1080 @ 25fps)
+- `bird_monitor.py` — full detection + tracking + remote species classification + web dashboard
+- Running YOLOv8s on Hailo at ~22 FPS, filtering for birds (COCO class 14)
+- Species classification via BioCLIP on NUC (remote API, ~0.2s per bird)
+- Low-confidence birds (<70%) auto-reclassified up to 3 times, keeping best result
 - Web dashboard at http://PI_IP:8888 with live stream, species labels, counts, and API
-- Retraining pipeline (`train_species.py`) ready for fine-tuning with labeled crops
-- Next: point at bird feeder, test with real birds
+- Video overlay: Norwegian date/time, bird count, FPS, species summary on transparent bar
+- Config via `.env` file (camera source, API URL, thresholds, etc.)
 
 ## Project log
 All progress is tracked in BIRD_PROJECT_LOG.md - update it as we go.
