@@ -19,9 +19,11 @@ import sqlite3
 import sys
 import threading
 import time
+import urllib.request
 from collections import OrderedDict
 from datetime import datetime, date
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
 from socketserver import ThreadingMixIn
 
 from PIL import Image, ImageDraw, ImageFont
@@ -29,27 +31,49 @@ from PIL import Image, ImageDraw, ImageFont
 from picamera2 import Picamera2
 from picamera2.devices import Hailo
 
-from species_classifier import SpeciesClassifier
-
 # ============================================================
-# Configuration
+# Configuration (loaded from .env file, see .env.example)
 # ============================================================
 
-PORT = 8888
-MODEL_PATH = "/usr/share/hailo-models/yolov8s_h8.hef"
+def _load_env(path):
+    """Load key=value pairs from a .env file into os.environ."""
+    if not os.path.isfile(path):
+        return
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                key, val = line.split("=", 1)
+                os.environ.setdefault(key.strip(), val.strip())
+
+_load_env(Path(__file__).parent / ".env")
+
+def _env(key, default):
+    return os.environ.get(key, default)
+
+def _env_int(key, default):
+    return int(os.environ.get(key, default))
+
+def _env_float(key, default):
+    return float(os.environ.get(key, default))
+
+PORT = _env_int("PORT", 8888)
+MODEL_PATH = _env("MODEL_PATH", "/usr/share/hailo-models/yolov8s_h8.hef")
 BIRD_CLASS_ID = 14  # COCO class index for "bird"
-CONFIDENCE_THRESHOLD = 0.4
-CROP_DIR = "/home/pi/ai/bird_crops"
-DB_PATH = "/home/pi/ai/birds.db"
+CONFIDENCE_THRESHOLD = _env_float("CONFIDENCE_THRESHOLD", 0.4)
+CROP_DIR = _env("CROP_DIR", "/home/pi/ai/bird_crops")
+DB_PATH = _env("DB_PATH", "/home/pi/ai/birds.db")
 MODEL_INPUT_SIZE = 640
 
 # --- Camera Configuration ---
-CAMERA_SOURCE = "elgato"  # "elgato" or "picamera2"
-ELGATO_DEVICE = "/dev/v4l/by-id/usb-Elgato_Cam_Link_4K_0005723438000-video-index0"
-ELGATO_WIDTH = 1920
-ELGATO_HEIGHT = 1080
-PICAMERA2_WIDTH = 1280
-PICAMERA2_HEIGHT = 960
+CAMERA_SOURCE = _env("CAMERA_SOURCE", "elgato")  # "elgato" or "picamera2"
+ELGATO_DEVICE = _env("ELGATO_DEVICE", "/dev/v4l/by-id/usb-Elgato_Cam_Link_4K_0005723438000-video-index0")
+ELGATO_WIDTH = _env_int("ELGATO_WIDTH", 1920)
+ELGATO_HEIGHT = _env_int("ELGATO_HEIGHT", 1080)
+PICAMERA2_WIDTH = _env_int("PICAMERA2_WIDTH", 1280)
+PICAMERA2_HEIGHT = _env_int("PICAMERA2_HEIGHT", 960)
 
 # Set frame dimensions based on camera source
 if CAMERA_SOURCE == "elgato":
@@ -60,13 +84,15 @@ else:
     FRAME_HEIGHT = PICAMERA2_HEIGHT
 
 # Tracker settings
-MAX_DISAPPEARED = 15   # frames before a bird is considered "gone" (~1s at 15fps)
-MAX_DISTANCE = 150     # max pixel distance to match same bird across frames
-CROP_SAVE_INTERVAL = 3.0  # seconds between crop saves for the same tracked bird
+MAX_DISAPPEARED = _env_int("MAX_DISAPPEARED", 15)
+MAX_DISTANCE = _env_int("MAX_DISTANCE", 150)
+CROP_SAVE_INTERVAL = _env_float("CROP_SAVE_INTERVAL", 3.0)
 
-# Species classifier (Phase 2 — BioCLIP zero-shot)
-SPECIES_LIST_PATH = "/home/pi/ai/models/norwegian_species.txt"
-SPECIES_RELOAD_INTERVAL = 60  # seconds between hot-reload checks
+# Species classification API (BioCLIP on NUC via Docker)
+SPECIES_API_URL = _env("SPECIES_API_URL", "http://192.168.1.64:5555")
+SPECIES_API_TIMEOUT = _env_int("SPECIES_API_TIMEOUT", 5)
+SPECIES_HEALTH_INTERVAL = _env_int("SPECIES_HEALTH_INTERVAL", 15)
+SPECIES_LIST_PATH = _env("SPECIES_LIST_PATH", "/home/pi/ai/models/norwegian_species.txt")
 
 # Fonts for PIL text rendering (supports æøå, unlike OpenCV putText)
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
@@ -399,12 +425,10 @@ class BirdMonitor:
         # Crop save rate limiting
         self.last_crop_time = {}  # track_id -> timestamp
 
-        # Species classifier (loaded in background — detection starts immediately)
-        self.classifier = None
-        self.classifier_loading = False
+        # Remote species classification API (BioCLIP on NUC)
+        self.species_api_ok = False  # True when NUC API is reachable
         self.species_labels = {}  # track_id -> (species, confidence)
-        self.classify_lock = threading.Lock()  # serialize BioCLIP calls (shared temp file)
-        self.last_reload_check = 0
+        self.last_health_check = 0
 
         os.makedirs(CROP_DIR, exist_ok=True)
 
@@ -452,25 +476,38 @@ class BirdMonitor:
             print(f"  PiCamera2: {FRAME_WIDTH}x{FRAME_HEIGHT}", flush=True)
 
         # Start processing in background thread
-        # Start processing immediately (detection works without species classifier)
         self._thread = threading.Thread(target=self._process_loop, daemon=True)
         self._thread.start()
         print(f"Behandlingsløkke startet. Dashbord på http://0.0.0.0:{PORT}", flush=True)
 
-        # Species classifier disabled — will run on NUC instead (Phase 2)
-        # self.classifier_loading = True
-        # self._classifier_thread = threading.Thread(target=self._load_classifier, daemon=True)
-        # self._classifier_thread.start()
+        # Check species API on NUC
+        self._check_species_api()
+        self._health_thread = threading.Thread(target=self._health_check_loop, daemon=True)
+        self._health_thread.start()
 
-    def _load_classifier(self):
-        """Load species classifier in background thread."""
+    def _check_species_api(self):
+        """Ping the remote species API health endpoint."""
         try:
-            self.classifier = SpeciesClassifier(SPECIES_LIST_PATH)
-            print("  Artsklassifisering aktivert!", flush=True)
-        except (FileNotFoundError, ImportError, ValueError) as e:
-            print(f"  Artsklassifisering ikke tilgjengelig: {e}", flush=True)
-        finally:
-            self.classifier_loading = False
+            req = urllib.request.Request(f"{SPECIES_API_URL}/health", method="GET")
+            with urllib.request.urlopen(req, timeout=SPECIES_API_TIMEOUT) as resp:
+                data = json.loads(resp.read())
+                was_ok = self.species_api_ok
+                self.species_api_ok = data.get("status") == "ok"
+                if self.species_api_ok and not was_ok:
+                    count = data.get("species_count", "?")
+                    print(f"  Klassifiseringsmotor: På ({count} arter)", flush=True)
+                elif not self.species_api_ok and was_ok:
+                    print("  Klassifiseringsmotor: Frakoblet", flush=True)
+        except Exception:
+            if self.species_api_ok:
+                print("  Klassifiseringsmotor: Frakoblet", flush=True)
+            self.species_api_ok = False
+
+    def _health_check_loop(self):
+        """Periodically check if the remote species API is reachable."""
+        while self.running:
+            time.sleep(SPECIES_HEALTH_INTERVAL)
+            self._check_species_api()
 
     def stop(self):
         """Clean shutdown - waits for processing thread to finish first."""
@@ -492,8 +529,6 @@ class BirdMonitor:
                 self.hailo.close()
             except Exception:
                 pass
-        if self.classifier:
-            self.classifier.close()
         print("Fuglevakt stoppet.", flush=True)
 
     # ---- Main processing loop ----
@@ -551,8 +586,8 @@ class BirdMonitor:
                         flush=True,
                     )
 
-                    # Submit species classification to background thread (non-blocking)
-                    if self.classifier and bbox:
+                    # Submit species classification to NUC API (non-blocking)
+                    if self.species_api_ok and bbox:
                         crop_copy = frame_rgb[
                             max(0, int(bbox[1])):min(frame_rgb.shape[0], int(bbox[3])),
                             max(0, int(bbox[0])):min(frame_rgb.shape[1], int(bbox[2]))
@@ -569,11 +604,6 @@ class BirdMonitor:
                     self.species_labels.pop(tid, None)
                     print(f"  [{now_str}] Fugl forlot. spor={tid}", flush=True)
 
-                # Periodic hot-reload check for species model
-                now_time = time.time()
-                if self.classifier and now_time - self.last_reload_check > SPECIES_RELOAD_INTERVAL:
-                    self.last_reload_check = now_time
-                    self.classifier.check_reload()
                 # 7. Draw overlays and encode JPEG
                 # picamera2 "RGB888" actually delivers BGR on Pi 5, so no conversion needed
                 display = frame_rgb
@@ -737,20 +767,12 @@ class BirdMonitor:
             text_draws.append((d["class_name"], x1, y1 - 4, FONT_SMALL, (100, 100, 100)))
 
         # Status overlay (top-left)
-        if self.classifier_loading:
-            species_status = "Artsmodell laster..."
-        elif self.classifier:
-            species_status = "Artsgjenkjenning aktiv"
-        else:
-            species_status = ""
-
         lines = [
             f"Fugler nå: {self.current_bird_count}",
             f"I dag: {self.today_visits} besøk",
             f"FPS: {self.fps:.1f}",
+            f"Klassifiseringsmotor: {'På' if self.species_api_ok else 'Frakoblet'}",
         ]
-        if species_status:
-            lines.append(species_status)
         y = 10
         for line in lines:
             tw, th = pil_text_size(line, FONT_HUD)
@@ -799,19 +821,32 @@ class BirdMonitor:
     # ---- Species classification ----
 
     def _classify_bird_async(self, track_id, crop):
-        """Classify a bird in a background thread and update labels when done.
+        """Classify a bird by sending the crop to the remote NUC API.
 
-        Called from a daemon thread so the video loop never blocks (~4s on Pi 5).
-        Uses a lock to serialize access (BioCLIP uses a shared temp file).
+        Called from a daemon thread so the video loop never blocks.
         """
         try:
-            with self.classify_lock:
-                species, confidence = self.classifier.classify(crop)
-            if species and species.lower() != "not_a_bird":
+            _, jpeg_buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            jpeg_bytes = jpeg_buf.tobytes()
+
+            req = urllib.request.Request(
+                f"{SPECIES_API_URL}/classify",
+                data=jpeg_bytes,
+                method="POST",
+                headers={"Content-Type": "application/octet-stream"},
+            )
+            with urllib.request.urlopen(req, timeout=SPECIES_API_TIMEOUT) as resp:
+                result = json.loads(resp.read())
+
+            species = result.get("species")
+            confidence = result.get("confidence", 0)
+            inf_time = result.get("inference_time", 0)
+
+            if species:
                 self.species_labels[track_id] = (species, confidence)
                 self.db.update_visit_species(track_id, species)
                 print(
-                    f"  [art] spor={track_id} \u2192 {species} ({confidence:.0%})",
+                    f"  [art] spor={track_id} → {species} ({confidence:.0%}) [{inf_time:.2f}s]",
                     flush=True,
                 )
         except Exception as e:

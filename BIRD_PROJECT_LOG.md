@@ -258,6 +258,44 @@ Added a `/label` page to the web dashboard for manually labeling bird crop image
 #### Usage
 Start `bird_monitor.py` as usual, then open `http://PI_IP:8888/label` in a browser.
 
+### 2026-02-20 - BioCLIP Classification API on NUC (Docker)
+
+Moved BioCLIP species classification from the Pi 5 (~4s per bird) to the NUC (i7, 32GB RAM) as a Dockerized HTTP API. Classification now takes ~0.2s per bird.
+
+#### Why Docker
+Python 3.13 on Debian 13 has compatibility issues with PyTorch/open_clip. Docker with Python 3.11 keeps the system clean.
+
+#### Setup
+All files in `/home/terje/birdcam/` on the NUC:
+
+| File | Purpose |
+|------|---------|
+| `species_api.py` | Flask API server (BioCLIP + zero-shot classification) |
+| `norwegian_species.txt` | 42 species list (English + Norwegian names, mounted as volume) |
+| `Dockerfile` | Python 3.11-slim, CPU-only PyTorch, model baked in |
+| `docker-compose.yml` | Port 5555, volume mount for species file |
+| `.env` | HuggingFace token (build-time only, gitignored) |
+
+#### API endpoints
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/classify` | POST | Send JPEG bytes, get `{species, species_en, confidence, inference_time}` |
+| `/health` | GET | Status check with model info and species count |
+
+#### Performance
+- Model load: ~2.5s at container start
+- Classification: ~0.18s per image on NUC (was ~4s on Pi 5)
+- Species file hot-reloads when modified (no restart needed)
+
+#### Commands
+```bash
+cd /home/terje/birdcam
+docker compose up -d          # Start
+docker compose logs -f        # Logs
+curl localhost:5555/health    # Health check
+curl -X POST --data-binary @image.jpg localhost:5555/classify  # Classify
+```
+
 ## Next Steps
 - [ ] Point camera at bird feeder and test species identification with real birds
 - [x] Add species classification (Phase 2) — BioCLIP zero-shot
