@@ -41,9 +41,23 @@ BIRD_CLASS_ID = 14  # COCO class index for "bird"
 CONFIDENCE_THRESHOLD = 0.4
 CROP_DIR = "/home/pi/ai/bird_crops"
 DB_PATH = "/home/pi/ai/birds.db"
-FRAME_WIDTH = 1280
-FRAME_HEIGHT = 960
 MODEL_INPUT_SIZE = 640
+
+# --- Camera Configuration ---
+CAMERA_SOURCE = "elgato"  # "elgato" or "picamera2"
+ELGATO_DEVICE = "/dev/v4l/by-id/usb-Elgato_Cam_Link_4K_0005723438000-video-index0"
+ELGATO_WIDTH = 1920
+ELGATO_HEIGHT = 1080
+PICAMERA2_WIDTH = 1280
+PICAMERA2_HEIGHT = 960
+
+# Set frame dimensions based on camera source
+if CAMERA_SOURCE == "elgato":
+    FRAME_WIDTH = ELGATO_WIDTH
+    FRAME_HEIGHT = ELGATO_HEIGHT
+else:
+    FRAME_WIDTH = PICAMERA2_WIDTH
+    FRAME_HEIGHT = PICAMERA2_HEIGHT
 
 # Tracker settings
 MAX_DISAPPEARED = 15   # frames before a bird is considered "gone" (~1s at 15fps)
@@ -415,15 +429,27 @@ class BirdMonitor:
             print(f"  Model output: {name} shape={shape} format={fmt}")
 
         # Initialize camera
-        print("Starter kamera...", flush=True)
-        self.picam2 = Picamera2()
-        config = self.picam2.create_video_configuration(
-            main={"size": (FRAME_WIDTH, FRAME_HEIGHT), "format": "RGB888"},
-        )
-        self.picam2.configure(config)
-        self.picam2.start()
-        time.sleep(1)  # let auto-exposure settle
-        print(f"  Kamera klart: {FRAME_WIDTH}x{FRAME_HEIGHT}", flush=True)
+        print(f"Starter kamera ({CAMERA_SOURCE})...", flush=True)
+        if CAMERA_SOURCE == "elgato":
+            self.cap = cv2.VideoCapture(ELGATO_DEVICE, cv2.CAP_V4L2)
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, ELGATO_WIDTH)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, ELGATO_HEIGHT)
+            if not self.cap.isOpened():
+                print(f"FEIL: Kunne ikke åpne Elgato på {ELGATO_DEVICE}", file=sys.stderr)
+                sys.exit(1)
+            actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+            print(f"  Elgato Cam Link: {actual_w}x{actual_h} @ {actual_fps:.0f}fps", flush=True)
+        else:
+            self.picam2 = Picamera2()
+            config = self.picam2.create_video_configuration(
+                main={"size": (FRAME_WIDTH, FRAME_HEIGHT), "format": "RGB888"},
+            )
+            self.picam2.configure(config)
+            self.picam2.start()
+            time.sleep(1)  # let auto-exposure settle
+            print(f"  PiCamera2: {FRAME_WIDTH}x{FRAME_HEIGHT}", flush=True)
 
         # Start processing in background thread
         # Start processing immediately (detection works without species classifier)
@@ -451,6 +477,11 @@ class BirdMonitor:
         self.running = False
         if hasattr(self, "_thread"):
             self._thread.join(timeout=5)
+        if hasattr(self, "cap"):
+            try:
+                self.cap.release()
+            except Exception:
+                pass
         if hasattr(self, "picam2"):
             try:
                 self.picam2.stop()
@@ -474,8 +505,14 @@ class BirdMonitor:
 
         while self.running:
             try:
-                # 1. Capture frame (RGB, shape: H x W x 3)
-                frame_rgb = self.picam2.capture_array("main")
+                # 1. Capture frame (BGR, shape: H x W x 3)
+                if CAMERA_SOURCE == "elgato":
+                    ret, frame_rgb = self.cap.read()
+                    if not ret:
+                        time.sleep(0.01)
+                        continue
+                else:
+                    frame_rgb = self.picam2.capture_array("main")
 
                 # 2. Prepare model input: resize to 640x640
                 model_input = cv2.resize(frame_rgb, (MODEL_INPUT_SIZE, MODEL_INPUT_SIZE))

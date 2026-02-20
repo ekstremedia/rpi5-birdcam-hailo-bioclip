@@ -5,7 +5,8 @@
       "Bash(libcamera-hello:*)",
       "Bash(python3:*)",
       "Bash(sudo ss:*)",
-      "Bash(ss:*)"
+      "Bash(ss:*)",
+      "Bash(v4l2-ctl:*)"
     ]
   }
 }
