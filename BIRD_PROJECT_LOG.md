@@ -434,7 +434,7 @@ Deployed the full streaming infrastructure on the VPS (185.14.97.143, Debian 11)
 - **mediamtx just works**: Single binary, YAML config, systemd service. Receives RTMP, serves WebRTC/HLS/RTSP/SRT out of the box.
 
 #### Stream flow (confirmed working)
-```
+```text
 Pi 5 → MJPEG → NUC → ffmpeg H.264 → RTMP → VPS mediamtx → WebRTC → Browser
 ```
 
@@ -445,6 +445,7 @@ Pi 5 → MJPEG → NUC → ffmpeg H.264 → RTMP → VPS mediamtx → WebRTC →
 - Live stream plays in browser
 
 #### Files changed on VPS
+
 | File | Change |
 |------|--------|
 | `/usr/local/bin/mediamtx` | Installed binary |
@@ -475,6 +476,7 @@ docker compose ps:
 - Vue page at `/fuglekamera` receives live updates via websocket
 
 #### VPS Laravel endpoints
+
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/api/birdcam/stats` | POST | Receives stats from NUC, caches + broadcasts via Reverb |
@@ -482,6 +484,7 @@ docker compose ps:
 | `/fuglekamera` | GET | Public Vue page with WebRTC player + live stats sidebar |
 
 #### Files on VPS
+
 | File | Purpose |
 |------|---------|
 | `app/Events/BirdcamStatsUpdated.php` | Reverb broadcast event |

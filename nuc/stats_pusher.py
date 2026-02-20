@@ -20,7 +20,11 @@ import requests
 PI_URL = os.getenv("PI_URL", "http://192.168.1.176:8888")
 LARAVEL_URL = os.getenv("LARAVEL_URL", "https://ekstremedia.no")
 LARAVEL_TOKEN = os.getenv("LARAVEL_TOKEN", "")
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "5"))
+try:
+    POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "5"))
+except ValueError:
+    print("Warning: invalid POLL_INTERVAL, using default 5s")
+    POLL_INTERVAL = 5
 
 STATS_ENDPOINT = f"{PI_URL}/api/stats"
 BIRDS_ENDPOINT = f"{PI_URL}/api/birds"
@@ -49,7 +53,7 @@ def push_to_laravel(stats, birds):
 
 
 def main():
-    print(f"Stats pusher started")
+    print("Stats pusher started")
     print(f"  Pi: {PI_URL}")
     print(f"  Laravel: {PUSH_ENDPOINT}")
     print(f"  Interval: {POLL_INTERVAL}s")
