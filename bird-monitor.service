@@ -1,0 +1,14 @@
+[Unit]
+Description=Fuglematerstasjon - AI Bird Monitor
+After=network.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/ai
+ExecStart=/usr/bin/python3 /home/pi/ai/bird_monitor.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

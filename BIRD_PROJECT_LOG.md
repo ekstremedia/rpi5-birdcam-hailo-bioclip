@@ -456,6 +456,21 @@ Pi 5 → MJPEG → NUC → ffmpeg H.264 → RTMP → VPS mediamtx → WebRTC →
 
 Full VPS setup documented in `vpssetup.md`.
 
+### 2026-02-20 - Autostart via systemd
+
+Set up `bird-monitor.service` so the bird monitor starts on boot and auto-restarts on crashes.
+
+#### Service file
+`/etc/systemd/system/bird-monitor.service` (source in `/home/pi/ai/bird-monitor.service`)
+
+#### Commands
+```bash
+sudo systemctl status bird-monitor    # Check status
+sudo journalctl -u bird-monitor -f    # Live logs
+sudo systemctl restart bird-monitor   # Restart after code changes
+sudo systemctl stop bird-monitor      # Stop
+```
+
 ## Next Steps
 - [ ] Point camera at bird feeder and test species identification with real birds
 - [ ] Disable Canon G25 OSD overlays (FUNC → MENU → Display Setup → Output Onscreen Displays → Off)
@@ -467,7 +482,7 @@ Full VPS setup documented in `vpssetup.md`.
 - [x] Pi ↔ classification server integration with health monitoring
 - [x] Config via `.env` file
 - [x] Switch to Canon LEGRIA via Elgato Cam Link
-- [ ] Set up auto-start on boot (systemd service)
+- [x] Set up auto-start on boot (systemd service)
 - [x] Stream relay to VPS — ffmpeg + stats_pusher on NUC
 - [x] Public web page — Fuglekamera.vue with WebRTC player
 - [x] Deploy mediamtx on VPS
