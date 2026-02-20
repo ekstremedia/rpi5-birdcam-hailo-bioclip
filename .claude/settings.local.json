@@ -3,7 +3,9 @@
     "allow": [
       "Bash(rpicam-vid:*)",
       "Bash(libcamera-hello:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(sudo ss:*)",
+      "Bash(ss:*)"
     ]
   }
 }
