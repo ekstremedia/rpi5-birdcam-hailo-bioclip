@@ -354,7 +354,7 @@ Also:
 Built the infrastructure to stream the bird feeder live to ekstremedia.no with real-time stats.
 
 #### Architecture
-```
+```text
 Pi 5 (LAN)                    NUC (LAN)                    VPS (ekstremedia.no)
 ─────────                     ─────────                    ────────────────────
 MJPEG stream ──────────────→  ffmpeg                       mediamtx

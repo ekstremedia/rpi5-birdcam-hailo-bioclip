@@ -7,7 +7,7 @@ while a **classification server** runs the species identification model over the
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────┐         ┌──────────────────────────────┐
 │  Raspberry Pi 5             │         │  Classification Server       │
 │                             │         │                              │
@@ -115,7 +115,7 @@ The video stream shows:
 A separate machine (any x86 box with a few GB of RAM) runs species classification as a
 Dockerized HTTP API. This offloads the ~600MB BioCLIP model from the Pi.
 
-See [birdcam/CLASSIFICATION.md](https://github.com/ekstremedia/pi5-ai/blob/legria/birdcam/CLASSIFICATION.md)
+See [birdcam/CLASSIFICATION.md](https://github.com/ekstremedia/pi5-ai/blob/main/birdcam/CLASSIFICATION.md)
 for full details on the model, API reference, and setup.
 
 ### Quick setup
@@ -159,7 +159,7 @@ No training needed — just list species names in `norwegian_species.txt`.
 The file `models/norwegian_species.txt` defines which species the system recognizes.
 Format: `English Name | Norsk navn`, one per line.
 
-```
+```text
 Great Tit | Kjøttmeis
 Blue Tit | Blåmeis
 Eurasian Magpie | Skjære
