@@ -9,7 +9,7 @@ Three machines work together: a **Raspberry Pi 5** (a small, affordable single-b
 Here's how the three machines talk to each other. The Pi captures video and detects birds, sends crops to the NUC for species identification, and streams everything to the VPS so anyone can watch online:
 
 ```text
-Pi 5 (192.168.1.176)          NUC (192.168.1.64)           VPS (ekstremedia.no)
+Pi 5                          NUC                           VPS
 ────────────────────          ────────────────────          ────────────────────
 Canon G25 → Elgato            species-api :5555
   → YOLOv8s on Hailo-8         BioCLIP classification
@@ -73,7 +73,7 @@ Then open `http://PI_IP:8888` in a browser.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CAMERA_SOURCE` | `elgato` | `elgato` or `picamera2` |
-| `SPECIES_API_URL` | `http://192.168.1.64:5555` | NUC classification server |
+| `SPECIES_API_URL` | `http://NUC_IP:5555` | NUC classification server |
 | `PORT` | `8888` | Web dashboard port |
 | `CONFIDENCE_THRESHOLD` | `0.4` | Minimum detection confidence |
 | `CROP_DIR` | `/home/pi/ai/bird_crops` | Where bird crop images are saved |
@@ -142,11 +142,11 @@ curl http://localhost:5555/health
 HF_TOKEN=hf_your_token
 
 # Stream relay
-PI_STREAM=http://192.168.1.176:8888/stream
-VPS_RTMP=rtmp://185.14.97.143:1935/birdcam/live
+PI_STREAM=http://PI_IP:8888/stream
+VPS_RTMP=rtmp://VPS_IP:1935/birdcam/live
 
 # Stats pusher
-PI_URL=http://192.168.1.176:8888
+PI_URL=http://PI_IP:8888
 LARAVEL_URL=https://ekstremedia.no
 LARAVEL_TOKEN=your_shared_secret_token
 POLL_INTERVAL=5
