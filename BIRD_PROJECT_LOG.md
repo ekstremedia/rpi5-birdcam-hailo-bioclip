@@ -312,7 +312,7 @@ Replaced the Pi HQ Camera (CSI) with a Canon LEGRIA HF G25 camcorder connected v
 - YUYV raw decode: ~17ms per 1080p frame (40ms if camera is idle/buffering)
 - Total pipeline at 1080p: capture + Hailo + overlays + JPEG ≈ 44ms → **~22 FPS**
 - BioCLIP was eating all CPU when loading on the Pi (~2 min startup) — disabled locally
-- Species classification now runs on NUC via HTTP API (~0.2s per bird)
+- Species classification now runs on classification server via HTTP API (~0.2s per bird)
 
 #### Overlay redesign
 - Replaced 4-line stacked HUD with single-line status bar across the top
@@ -331,6 +331,24 @@ Replaced the Pi HQ Camera (CSI) with a Canon LEGRIA HF G25 camcorder connected v
 - Camera source, device path, resolution, API URL, thresholds, etc.
 - No code changes needed to switch between cameras or adjust parameters
 
+### 2026-02-20 - Pi ↔ Classification Server Integration
+
+Connected `bird_monitor.py` on the Pi to the BioCLIP API on the classification server:
+
+- Replaced local BioCLIP import with HTTP calls to `SPECIES_API_URL/classify`
+- Added periodic health check (every 15s) — pings `/health` endpoint
+- HUD overlay shows "Klassifiseringsmotor: På" or "Klassifiseringsmotor: Frakoblet"
+- On bird arrival, crop is JPEG-encoded and POST-ed to classification server in background thread
+- Species + confidence returned in ~0.2s, logged to console with inference time
+
+Also:
+- Fixed Norwegian special characters (æøå) in `norwegian_species.txt`
+- Fixed BioCLIP confidence bug: was missing `logit_scale` temperature — confidence went from ~3% to ~45%
+- Removed `from species_classifier import SpeciesClassifier` dependency
+- Wrapped picamera2 imports in try/except with install instructions
+- Removed accidental gstshark trace directory, added to `.gitignore`
+- Wrote project README with architecture diagram and setup instructions
+
 ## Next Steps
 - [ ] Point camera at bird feeder and test species identification with real birds
 - [ ] Disable Canon G25 OSD overlays (FUNC → MENU → Display Setup → Output Onscreen Displays → Off)
@@ -338,7 +356,9 @@ Replaced the Pi HQ Camera (CSI) with a Canon LEGRIA HF G25 camcorder connected v
 - [x] Add retraining pipeline for learning new species (Phase 3)
 - [x] Norwegian translation of all user-facing text
 - [x] Web-based labeling UI at `/label` for building training data
-- [x] Move BioCLIP to NUC as remote API
+- [x] Offload classification to server (Docker + BioCLIP API)
+- [x] Pi ↔ classification server integration with health monitoring
+- [x] Config via `.env` file
 - [x] Switch to Canon LEGRIA via Elgato Cam Link
 - [ ] Set up auto-start on boot (systemd service)
 - [ ] Stream relay to VPS (Phase 3 of PLAN.md)
