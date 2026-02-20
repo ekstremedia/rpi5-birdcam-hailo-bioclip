@@ -110,30 +110,24 @@ The video stream shows:
 - **FPS**: Processing frame rate
 - **Klassifiseringsmotor: På/Frakoblet**: Whether the classification server is reachable
 
-## Classification Server
+## NUC Services
 
-A separate machine (any x86 box with a few GB of RAM) runs species classification as a
-Dockerized HTTP API. This offloads the ~600MB BioCLIP model from the Pi.
+A separate machine (NUC, any x86 box with a few GB of RAM) runs three Docker services.
+All files are in the [`nuc/`](nuc/) directory — see [`nuc/README.md`](nuc/README.md) for full details.
 
-See [birdcam/CLASSIFICATION.md](https://github.com/ekstremedia/pi5-ai/blob/main/birdcam/CLASSIFICATION.md)
-for full details on the model, API reference, and setup.
+| Service | Purpose |
+|---------|---------|
+| `species-api` | BioCLIP species classification API (port 5555) |
+| `stream-relay` | ffmpeg MJPEG→H.264→RTMP relay to VPS |
+| `stats-pusher` | Polls Pi stats, pushes to Laravel via Reverb |
 
 ### Quick setup
 
-The classification server files live in `/home/terje/birdcam/` (not in this repo — it runs
-on a different machine).
-
 ```bash
-# Create directory and files (see CLASSIFICATION.md for contents)
-mkdir -p ~/birdcam && cd ~/birdcam
+cd nuc
+cp .env.example .env
+# Edit .env with your values
 
-# Set HuggingFace token for model download
-echo "HF_TOKEN=hf_your_token_here" > .env
-
-# Build (downloads PyTorch + BioCLIP model, takes a few minutes)
-docker compose build
-
-# Start
 docker compose up -d
 
 # Verify

@@ -1,0 +1,35 @@
+services:
+  species-api:
+    build:
+      context: .
+      args:
+        HF_TOKEN: ${HF_TOKEN}
+    ports:
+      - "5555:5555"
+    volumes:
+      - ./norwegian_species.txt:/data/norwegian_species.txt:ro
+    restart: unless-stopped
+
+  stream-relay:
+    image: linuxserver/ffmpeg:latest
+    entrypoint: /bin/bash
+    command: /scripts/stream_relay.sh
+    volumes:
+      - ./stream_relay.sh:/scripts/stream_relay.sh:ro
+    environment:
+      - PI_STREAM=${PI_STREAM:-http://192.168.1.176:8888/stream}
+      - VPS_RTMP=${VPS_RTMP:-rtmp://ekstremedia.no:1935/birdcam/live}
+    restart: unless-stopped
+
+  stats-pusher:
+    image: python:3.11-slim
+    command: >
+      sh -c "pip install --no-cache-dir requests && python -u /app/stats_pusher.py"
+    volumes:
+      - ./stats_pusher.py:/app/stats_pusher.py:ro
+    environment:
+      - PI_URL=${PI_URL:-http://192.168.1.176:8888}
+      - LARAVEL_URL=${LARAVEL_URL:-https://ekstremedia.no}
+      - LARAVEL_TOKEN=${LARAVEL_TOKEN:-}
+      - POLL_INTERVAL=${POLL_INTERVAL:-5}
+    restart: unless-stopped
