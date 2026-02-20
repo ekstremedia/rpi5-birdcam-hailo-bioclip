@@ -245,6 +245,7 @@ Added a `/label` page to the web dashboard for manually labeling bird crop image
 - New methods: `get_unlabeled_visits`, `set_label`, `skip_visit`, `undo_label`, `get_label_stats`
 
 #### API endpoints
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/label` | GET | Labeling page |
@@ -277,6 +278,7 @@ All files in `/home/terje/birdcam/` on the NUC:
 | `.env` | HuggingFace token (build-time only, gitignored) |
 
 #### API endpoints
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/classify` | POST | Send JPEG bytes, get `{species, species_en, confidence, inference_time}` |

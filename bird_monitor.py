@@ -28,8 +28,13 @@ from socketserver import ThreadingMixIn
 
 from PIL import Image, ImageDraw, ImageFont
 
-from picamera2 import Picamera2
-from picamera2.devices import Hailo
+try:
+    from picamera2 import Picamera2
+    from picamera2.devices import Hailo
+except ImportError:
+    raise ImportError(
+        "picamera2 is required. Install with: sudo apt install python3-picamera2"
+    )
 
 # ============================================================
 # Configuration (loaded from .env file, see .env.example)
