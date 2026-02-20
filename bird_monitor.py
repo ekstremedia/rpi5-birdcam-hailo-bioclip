@@ -457,10 +457,10 @@ class BirdMonitor:
         self._thread.start()
         print(f"Behandlingsløkke startet. Dashbord på http://0.0.0.0:{PORT}", flush=True)
 
-        # Load species classifier in background (takes 1-2 min)
-        self.classifier_loading = True
-        self._classifier_thread = threading.Thread(target=self._load_classifier, daemon=True)
-        self._classifier_thread.start()
+        # Species classifier disabled — will run on NUC instead (Phase 2)
+        # self.classifier_loading = True
+        # self._classifier_thread = threading.Thread(target=self._load_classifier, daemon=True)
+        # self._classifier_thread.start()
 
     def _load_classifier(self):
         """Load species classifier in background thread."""
@@ -574,7 +574,6 @@ class BirdMonitor:
                 if self.classifier and now_time - self.last_reload_check > SPECIES_RELOAD_INTERVAL:
                     self.last_reload_check = now_time
                     self.classifier.check_reload()
-
                 # 7. Draw overlays and encode JPEG
                 # picamera2 "RGB888" actually delivers BGR on Pi 5, so no conversion needed
                 display = frame_rgb
