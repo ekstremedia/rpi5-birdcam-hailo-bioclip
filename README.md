@@ -37,7 +37,7 @@ The Pi runs `bird_monitor.py` — the main application that captures video, dete
 ### Hardware
 
 - Raspberry Pi 5 (8GB)
-- [Hailo-8 AI HAT+](https://www.raspberrypi.com/products/ai-hat-plus/) — a plug-in accelerator board for running AI models, rated at 26 TOPS (tera operations per second — a measure of AI processing speed)
+- [Hailo-8 AI HAT+](https://www.raspberrypi.com/products/ai-hat) — a plug-in accelerator board for running AI models, rated at 26 TOPS (tera operations per second — a measure of AI processing speed)
 - Camera: Canon LEGRIA HF G25 via [Elgato Cam Link 4K](https://www.elgato.com/cam-link-4k) (captures the camera's HDMI output as a USB webcam)
 - Backup camera: Raspberry Pi HQ Camera (IMX477, CSI)
 - OS: Debian 13 (trixie)
