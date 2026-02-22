@@ -107,9 +107,17 @@ NETATMO_INTERVAL = _env_int("NETATMO_INTERVAL", 600)  # seconds between fetches
 
 # Fonts for PIL text rendering (supports æøå, unlike OpenCV putText)
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-FONT_LABEL = ImageFont.truetype(FONT_PATH, 20)    # bird labels on bboxes
-FONT_HUD = ImageFont.truetype(FONT_PATH, 22)      # status overlay (top-left)
-FONT_SMALL = ImageFont.truetype(FONT_PATH, 14)     # non-bird class names
+
+def _load_fonts():
+    try:
+        return (ImageFont.truetype(FONT_PATH, 20),
+                ImageFont.truetype(FONT_PATH, 22),
+                ImageFont.truetype(FONT_PATH, 14))
+    except (OSError, IOError):
+        default = ImageFont.load_default()
+        return default, default, default
+
+FONT_LABEL, FONT_HUD, FONT_SMALL = _load_fonts()
 
 
 def pil_text_size(text, font):

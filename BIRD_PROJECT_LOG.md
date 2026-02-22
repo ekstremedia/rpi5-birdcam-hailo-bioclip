@@ -533,3 +533,18 @@ docker compose ps:
 - Inline-explained technical terms on first mention (Hailo, TOPS, COCO, BioCLIP, Docker, RTMP, MJPEG, etc.)
 - Kept all existing tables, code blocks, architecture diagram, and links
 - Updated git clone URL to new repo name: rpi5-birdcam-hailo-bioclip
+
+### 2026-02-22 - Test suite + GitHub Actions CI
+- Added pytest test suite (51 tests) covering pure-logic components:
+  - BirdDB (15 tests): schema, visit lifecycle, today count, labeling
+  - CentroidTracker (12 tests): registration, matching, disappearance, events
+  - Detection parsing (7 tests): Hailo output format, confidence filtering, coordinate scaling
+  - Env helpers (10 tests): _load_env, _env_int, _env_float
+  - Species file loading (5 tests): pipe format parsing, comments, edge cases
+- Hardware mocking in conftest.py: fake picamera2/Hailo modules via sys.modules
+- One production change: wrapped font loading in try/except (degrades gracefully on CI)
+- GitHub Actions workflow (.github/workflows/test.yml):
+  - Runs on push/PR to main, Ubuntu latest, Python 3.13
+  - Installs fonts-dejavu-core + python3-opencv via apt
+  - cancel-in-progress: true to avoid wasting runner minutes
+- All 51 tests pass locally on the Pi in ~3.6s
